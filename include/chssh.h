@@ -201,6 +201,16 @@ int chssh_auth_decide(chssh_ctx_t *ctx, int accept);
  */
 int chssh_channel_send(chssh_ctx_t *ctx, const uint8_t *data, size_t len);
 
+/**
+ * Send a transport keepalive after keys are active (post-NEWKEYS).
+ * Uses OpenSSH-compatible SSH_MSG_GLOBAL_REQUEST "keepalive@openssh.com"
+ * (want_reply=1). Peer SUCCESS/FAILURE is ignored. Safe once encrypt_out
+ * is on (KEX complete); preferred while CHSSH_STATE_READY to prevent
+ * field gear idle disconnects.
+ * @return 0 ok, -1 not ready / not encrypted / send failed.
+ */
+int chssh_send_keepalive(chssh_ctx_t *ctx);
+
 /** Request orderly close (sends disconnect when possible). */
 int chssh_disconnect(chssh_ctx_t *ctx, const char *description);
 

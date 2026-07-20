@@ -628,13 +628,66 @@ static int send_service_and_auth_client(chssh_ctx_t *ctx)
     return chssh_i_send_packet(ctx, pl, off);
 }
 
+static int send_window_adjust(chssh_ctx_t *ctx, uint32_t bytes)
+{
+    uint8_t pl[9];
+    size_t off = 0;
+    if (!ctx || bytes == 0 || !ctx->channel_ready) {
+        return 0;
+    }
+    pl[off++] = CHSSH_MSG_CHANNEL_WINDOW_ADJUST;
+    put_u32(pl + off, ctx->peer_channel);
+    off += 4;
+    put_u32(pl + off, bytes);
+    off += 4;
+    if (chssh_i_send_packet(ctx, pl, off) != 0) {
+        return -1;
+    }
+    ctx->local_window += bytes;
+    return 0;
+}
+
+/** After consuming peer CHANNEL_DATA, replenish RX window when low. */
+static int maybe_replenish_local_window(chssh_ctx_t *ctx, uint32_t consumed)
+{
+    uint32_t target;
+    uint32_t add;
+    if (!ctx || consumed == 0) {
+        return 0;
+    }
+    if (ctx->local_window >= consumed) {
+        ctx->local_window -= consumed;
+    } else {
+        ctx->local_window = 0;
+    }
+    target = (uint32_t)ctx->cfg.max_channel_size;
+    if (target == 0) {
+        target = (uint32_t)CHSSH_DEFAULT_CHANNEL;
+    }
+    /* Replenish when below half of advertised capacity. */
+    if (ctx->local_window > target / 2) {
+        return 0;
+    }
+    add = target - ctx->local_window;
+    if (add < 16384u && ctx->local_window > 0) {
+        return 0; /* small top-ups not worth a packet until very low */
+    }
+    return send_window_adjust(ctx, add);
+}
+
 static int send_channel_open_session(chssh_ctx_t *ctx)
 {
     uint8_t pl[64];
     size_t off = 0;
     const char *t = "session";
     size_t n = strlen(t);
+    uint32_t win = (uint32_t)ctx->cfg.max_channel_size;
+    if (win == 0) {
+        win = (uint32_t)CHSSH_DEFAULT_CHANNEL;
+    }
     ctx->local_channel = 0;
+    ctx->local_window = win;
+    ctx->local_max_packet = 32768;
     pl[off++] = CHSSH_MSG_CHANNEL_OPEN;
     put_u32(pl + off, (uint32_t)n);
     off += 4;
@@ -642,9 +695,9 @@ static int send_channel_open_session(chssh_ctx_t *ctx)
     off += n;
     put_u32(pl + off, ctx->local_channel);
     off += 4;
-    put_u32(pl + off, (uint32_t)ctx->cfg.max_channel_size);
+    put_u32(pl + off, win);
     off += 4;
-    put_u32(pl + off, 32768);
+    put_u32(pl + off, ctx->local_max_packet);
     off += 4;
     return chssh_i_send_packet(ctx, pl, off);
 }
@@ -861,6 +914,24 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
     }
     case CHSSH_MSG_IGNORE:
     case CHSSH_MSG_DEBUG:
+    case CHSSH_MSG_REQUEST_SUCCESS:
+    case CHSSH_MSG_REQUEST_FAILURE:
+        /* Keepalive / global-request replies — no app action. */
+        return 0;
+    case CHSSH_MSG_GLOBAL_REQUEST:
+        /*
+         * Peer global request (e.g. hostkeys-00@openssh.com, keepalive).
+         * If want_reply is set, answer FAILURE (we do not implement payloads)
+         * so the peer does not hang waiting.
+         */
+        if (len >= 6) {
+            uint32_t nlen = get_u32(p + 1);
+            size_t want_off = 5 + (size_t)nlen;
+            if (want_off < len && p[want_off] != 0) {
+                uint8_t rep[1] = {CHSSH_MSG_REQUEST_FAILURE};
+                (void)chssh_i_send_packet(ctx, rep, 1);
+            }
+        }
         return 0;
     case CHSSH_MSG_KEXINIT:
         if (store_blob(&ctx->peer_kexinit, &ctx->peer_kexinit_len, p, len) !=
@@ -1055,11 +1126,20 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
         return 0;
     case CHSSH_MSG_CHANNEL_OPEN_CONFIRM:
         if (ctx->role == CHSSH_ROLE_CLIENT && len >= 17) {
+            /* type | recipient | sender | window | max_packet */
             ctx->peer_channel = get_u32(p + 5);
+            ctx->remote_window = get_u32(p + 9);
+            ctx->remote_max_packet = get_u32(p + 13);
             memset(&ev, 0, sizeof(ev));
             ev.type = CHSSH_EVENT_CHANNEL_OPEN;
             (void)chssh_i_push_event(ctx, &ev);
             return send_subsystem_request(ctx);
+        }
+        return 0;
+    case CHSSH_MSG_CHANNEL_WINDOW_ADJUST:
+        if (len >= 9) {
+            uint32_t add = get_u32(p + 5);
+            ctx->remote_window += add;
         }
         return 0;
     case CHSSH_MSG_CHANNEL_REQUEST:
@@ -1124,6 +1204,10 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
                 memcpy(ev.u.data.data, p + 9, dlen);
                 ev.u.data.len = dlen;
                 (void)chssh_i_push_event(ctx, &ev);
+                /* RFC 4254: consumer must WINDOW_ADJUST or peer stalls/closes. */
+                if (maybe_replenish_local_window(ctx, dlen) != 0) {
+                    return -1;
+                }
             }
         }
         return 0;
@@ -1603,6 +1687,11 @@ int chssh_channel_send(chssh_ctx_t *ctx, const uint8_t *data, size_t len)
         len > CHSSH_DATA_MAX) {
         return -1;
     }
+    if (!ctx->lab_mode && ctx->remote_window < len) {
+        /* Peer has not granted enough window; refuse rather than violate RFC. */
+        chssh_i_set_error(ctx, 23, "channel send: remote window exhausted");
+        return -1;
+    }
     pl[off++] = CHSSH_MSG_CHANNEL_DATA;
     put_u32(pl + off, ctx->peer_channel);
     off += 4;
@@ -1610,7 +1699,63 @@ int chssh_channel_send(chssh_ctx_t *ctx, const uint8_t *data, size_t len)
     off += 4;
     memcpy(pl + off, data, len);
     off += len;
-    return chssh_i_send_packet(ctx, pl, off);
+    if (chssh_i_send_packet(ctx, pl, off) != 0) {
+        return -1;
+    }
+    if (!ctx->lab_mode && ctx->remote_window >= len) {
+        ctx->remote_window -= (uint32_t)len;
+    }
+    return 0;
+}
+
+int chssh_send_keepalive(chssh_ctx_t *ctx)
+{
+    /*
+     * OpenSSH ServerAlive: GLOBAL_REQUEST "keepalive@openssh.com" want_reply=1.
+     * Also send SSH_MSG_IGNORE as belt-and-suspenders for stacks that ignore
+     * unknown global requests without want_reply handling.
+     */
+    static const char name[] = "keepalive@openssh.com";
+    uint8_t pl[64];
+    size_t off = 0;
+    size_t n = sizeof(name) - 1;
+
+    if (!ctx || ctx->error) {
+        return -1;
+    }
+    if (ctx->lab_mode) {
+        /* Lab has no wire idle timers; treat as success no-op. */
+        return 0;
+    }
+    if (!ctx->encrypt_out) {
+        return -1;
+    }
+
+    pl[off++] = CHSSH_MSG_GLOBAL_REQUEST;
+    put_u32(pl + off, (uint32_t)n);
+    off += 4;
+    memcpy(pl + off, name, n);
+    off += n;
+    pl[off++] = 1; /* want_reply */
+    if (chssh_i_send_packet(ctx, pl, off) != 0) {
+        return -1;
+    }
+
+    /* SSH_MSG_IGNORE string "chssh-ka" */
+    {
+        static const char data[] = "chssh-ka";
+        size_t dlen = sizeof(data) - 1;
+        off = 0;
+        pl[off++] = CHSSH_MSG_IGNORE;
+        put_u32(pl + off, (uint32_t)dlen);
+        off += 4;
+        memcpy(pl + off, data, dlen);
+        off += dlen;
+        if (chssh_i_send_packet(ctx, pl, off) != 0) {
+            return -1;
+        }
+    }
+    return 0;
 }
 
 int chssh_disconnect(chssh_ctx_t *ctx, const char *description)

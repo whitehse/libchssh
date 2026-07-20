@@ -104,6 +104,27 @@ int main(void)
     }
     assert(saw);
 
+    /* Keepalive must queue after NEWKEYS (client → server). */
+    assert(chssh_send_keepalive(dev) == 0);
+    shuttle(dev, nms);
+    while (chssh_next_event(nms, &ev)) {
+        if (ev.type == CHSSH_EVENT_ERROR) {
+            fprintf(stderr, "nms keepalive error: %s\n", ev.u.error.message);
+            return 1;
+        }
+    }
+    /* Server reply to want_reply GLOBAL_REQUEST (SUCCESS/FAILURE) → client. */
+    shuttle(nms, dev);
+    while (chssh_next_event(dev, &ev)) {
+        if (ev.type == CHSSH_EVENT_ERROR) {
+            fprintf(stderr, "dev after keepalive error: %s\n",
+                    ev.u.error.message);
+            return 1;
+        }
+    }
+    assert(chssh_current_state(nms) == CHSSH_STATE_READY);
+    assert(chssh_current_state(dev) == CHSSH_STATE_READY);
+
     chssh_destroy(nms);
     chssh_destroy(dev);
     printf("  PASS: production OpenSSL KEX dialectic (group14-sha256 + aes128-ctr)\n");

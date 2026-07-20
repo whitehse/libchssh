@@ -27,6 +27,8 @@
 #define CHSSH_MSG_USERAUTH_SUCCESS      52
 #define CHSSH_MSG_USERAUTH_BANNER       53
 #define CHSSH_MSG_GLOBAL_REQUEST        80
+#define CHSSH_MSG_REQUEST_SUCCESS       81
+#define CHSSH_MSG_REQUEST_FAILURE       82
 #define CHSSH_MSG_CHANNEL_OPEN          90
 #define CHSSH_MSG_CHANNEL_OPEN_CONFIRM  91
 #define CHSSH_MSG_CHANNEL_OPEN_FAILURE  92
@@ -65,6 +67,10 @@ struct chssh_ctx {
 
     uint32_t local_channel;
     uint32_t peer_channel;
+    uint32_t local_window;  /* remaining RX window we advertised to peer */
+    uint32_t remote_window; /* remaining TX window peer advertised to us */
+    uint32_t local_max_packet;
+    uint32_t remote_max_packet;
     uint32_t send_seq;
     uint32_t recv_seq;
 
