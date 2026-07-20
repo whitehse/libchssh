@@ -1,0 +1,22 @@
+# Build artifacts
+build/
+cmake-build-*/
+*.a
+*.o
+*.so
+*.dylib
+
+# Editor/IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test leftovers
+/tmp/
+*.log
