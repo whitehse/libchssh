@@ -664,13 +664,20 @@ static int maybe_replenish_local_window(chssh_ctx_t *ctx, uint32_t consumed)
     if (target == 0) {
         target = (uint32_t)CHSSH_DEFAULT_CHANNEL;
     }
-    /* Replenish when below half of advertised capacity. */
-    if (ctx->local_window > target / 2) {
+    /*
+     * Replenish aggressively for large NETCONF transfers (get-config).
+     * Waiting until half-empty stalls peers that buffer multi-MB replies.
+     * Top up whenever we drop below 75% of target (or any time window is 0).
+     */
+    if (ctx->local_window > (target - target / 4) && ctx->local_window > 0) {
         return 0;
     }
     add = target - ctx->local_window;
-    if (add < 16384u && ctx->local_window > 0) {
-        return 0; /* small top-ups not worth a packet until very low */
+    if (add == 0) {
+        return 0;
+    }
+    if (add < 32768u && ctx->local_window > 65536u) {
+        return 0; /* skip tiny top-ups while still comfortably stocked */
     }
     return send_window_adjust(ctx, add);
 }
