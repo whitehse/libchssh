@@ -58,6 +58,10 @@ add_executable(chssh_multi_channel_test tests/test_chssh_multi_channel.c)
 target_link_libraries(chssh_multi_channel_test PRIVATE chssh)
 add_test(NAME chssh_multi_channel COMMAND chssh_multi_channel_test)
 
+add_executable(chssh_shell_test tests/test_chssh_shell.c)
+target_link_libraries(chssh_shell_test PRIVATE chssh)
+add_test(NAME chssh_shell COMMAND chssh_shell_test)
+
 add_executable(chssh_hold_ident_test tests/test_chssh_hold_ident.c)
 target_link_libraries(chssh_hold_ident_test PRIVATE chssh)
 add_test(NAME chssh_hold_ident COMMAND chssh_hold_ident_test)

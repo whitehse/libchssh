@@ -61,6 +61,10 @@ typedef struct {
     uint32_t remote_max_packet;
     char pending_subsystem[CHSSH_SUBSYS_NAME_MAX + 1];
     char subsystem[CHSSH_SUBSYS_NAME_MAX + 1];
+    int pending_shell;      /* we sent shell request; wait SUCCESS */
+    int shell_req_pending;  /* peer asked shell; wait request_decide */
+    int shell_want_reply;   /* peer want_reply for pending shell */
+    int is_shell;           /* shell channel (staff reverse) */
 } chssh_channel_t;
 
 struct chssh_ctx {
@@ -88,6 +92,7 @@ struct chssh_ctx {
     int channel_ready; /* 1 if any channel READY (or netconf for E7) */
     int strict_kex; /* both peers offered kex-strict-* markers */
     int auto_open_netconf;
+    int auto_accept_shell;
 
     chssh_channel_t channels[CHSSH_MAX_CHANNELS];
     uint32_t next_local_id;

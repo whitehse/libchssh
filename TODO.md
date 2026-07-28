@@ -22,7 +22,7 @@
 ## Next
 
 - [x] Multi-channel + named subsystems (ADR 015; CPE call-home)
-- [ ] Server-initiated session+shell (staff reverse; CPE design PR-2)
+- [x] Server-initiated session+shell (staff reverse; CPE design PR-2)
 - [ ] Wire interop green on CI with `sshpass` + assert READY/hello
 - [ ] curve25519-sha256 KEX (optional modern path)
 - [ ] ed25519 host keys (keep RSA preferred for field OLTs)

@@ -100,6 +100,13 @@ typedef struct {
      * Default 1 (E7 path). Set 0 for app-driven multi-channel (CPE call-home).
      */
     int auto_open_netconf;
+
+    /**
+     * When peer requests shell (CHANNEL_REQUEST "shell"), auto-accept if 1.
+     * Default 0: emit CHSSH_EVENT_SHELL and wait for chssh_channel_request_decide.
+     * Lab tests and simple CPE agents may set 1.
+     */
+    int auto_accept_shell;
 } chssh_config_t;
 
 typedef struct chssh_ctx chssh_ctx_t;
@@ -132,6 +139,7 @@ typedef enum {
 
     CHSSH_EVENT_CHANNEL_OPEN,    /* session channel open (u.channel) */
     CHSSH_EVENT_SUBSYSTEM,       /* subsystem request/ready (u.subsystem) */
+    CHSSH_EVENT_SHELL,           /* peer requested shell (u.channel); decide */
     CHSSH_EVENT_READY,           /* netconf channel ready (E7 compat) */
 
     CHSSH_EVENT_CHANNEL_DATA,    /* plaintext bytes (u.data) */
@@ -233,9 +241,9 @@ int chssh_auth_decide(chssh_ctx_t *ctx, int accept);
 /* --- Multi-channel API (ADR 015) --- */
 
 /**
- * After authentication: open a session channel.
+ * After authentication: open a session channel (either role).
  * On success fills @p local_id_out with the local channel id.
- * Client: sends CHANNEL_OPEN. Server: not typical (use for reverse shell later).
+ * Server uses this to open a staff shell channel toward a CPE client.
  * @return 0 ok, -1 error.
  */
 int chssh_channel_open_session(chssh_ctx_t *ctx, uint32_t *local_id_out);
@@ -248,6 +256,20 @@ int chssh_channel_open_session(chssh_ctx_t *ctx, uint32_t *local_id_out);
  */
 int chssh_channel_request_subsystem(chssh_ctx_t *ctx, uint32_t local_id,
                                     const char *name);
+
+/**
+ * Request an interactive shell on an open session channel (after OPEN confirm).
+ * Used by edgehost toward CPE for staff reverse shell (no CPE sshd).
+ * @return 0 ok, -1 error.
+ */
+int chssh_channel_request_shell(chssh_ctx_t *ctx, uint32_t local_id);
+
+/**
+ * Accept or reject a pending channel request (shell) after CHSSH_EVENT_SHELL.
+ * @return 0 ok, -1 no pending / error.
+ */
+int chssh_channel_request_decide(chssh_ctx_t *ctx, uint32_t local_id,
+                                 int accept);
 
 /**
  * Queue plaintext for a specific channel (encrypted on wire in production).
