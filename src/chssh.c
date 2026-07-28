@@ -6,7 +6,7 @@
  * lab_mode=1: dialectic cleartext after NEWKEYS (not wire-interop).
  * lab_mode=0: OpenSSL production path:
  *   diffie-hellman-group14-sha256, ssh-rsa/rsa-sha2-256 host key,
- *   aes128-ctr, hmac-sha2-256, subsystem netconf.
+ *   aes128-ctr, hmac-sha2-256, multi-channel named subsystems (ADR 015).
  */
 
 #include "chssh_internal.h"
@@ -536,7 +536,8 @@ static int server_handle_kexdh_init(chssh_ctx_t *ctx, const uint8_t *p,
 }
 
 static int send_service_and_auth_client(chssh_ctx_t *ctx);
-static int mark_ready(chssh_ctx_t *ctx);
+static int mark_channel_ready(chssh_ctx_t *ctx, chssh_channel_t *ch,
+                              const char *sub);
 
 static int finish_kex_lab(chssh_ctx_t *ctx)
 {
@@ -628,118 +629,265 @@ static int send_service_and_auth_client(chssh_ctx_t *ctx)
     return chssh_i_send_packet(ctx, pl, off);
 }
 
-static int send_window_adjust(chssh_ctx_t *ctx, uint32_t bytes)
+/* ---- multi-channel helpers (ADR 015) ---- */
+
+static uint32_t default_channel_window(const chssh_ctx_t *ctx)
+{
+    uint32_t win = (uint32_t)ctx->cfg.max_channel_size;
+    if (win == 0) {
+        win = (uint32_t)CHSSH_DEFAULT_CHANNEL;
+    }
+    return win;
+}
+
+static chssh_channel_t *channel_by_local(chssh_ctx_t *ctx, uint32_t local_id)
+{
+    size_t i;
+    for (i = 0; i < CHSSH_MAX_CHANNELS; i++) {
+        if (ctx->channels[i].state != CHSSH_CH_FREE &&
+            ctx->channels[i].local_id == local_id) {
+            return &ctx->channels[i];
+        }
+    }
+    return NULL;
+}
+
+static chssh_channel_t *channel_alloc(chssh_ctx_t *ctx)
+{
+    size_t i;
+    for (i = 0; i < CHSSH_MAX_CHANNELS; i++) {
+        if (ctx->channels[i].state == CHSSH_CH_FREE) {
+            memset(&ctx->channels[i], 0, sizeof(ctx->channels[i]));
+            return &ctx->channels[i];
+        }
+    }
+    return NULL;
+}
+
+static chssh_channel_t *channel_primary_ready(chssh_ctx_t *ctx)
+{
+    size_t i;
+    chssh_channel_t *any = NULL;
+    for (i = 0; i < CHSSH_MAX_CHANNELS; i++) {
+        if (ctx->channels[i].state == CHSSH_CH_READY) {
+            if (strcmp(ctx->channels[i].subsystem, CHSSH_SUBSYSTEM_NETCONF) ==
+                0) {
+                return &ctx->channels[i];
+            }
+            if (!any) {
+                any = &ctx->channels[i];
+            }
+        }
+    }
+    return any;
+}
+
+static int subsystem_allowed(const chssh_ctx_t *ctx, const char *name)
+{
+    int i;
+    if (!name || !name[0]) {
+        return 0;
+    }
+    for (i = 0; i < ctx->n_allowed_subsys; i++) {
+        if (strcmp(ctx->allowed_subsys[i], name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void parse_allowed_subsystems(chssh_ctx_t *ctx, const char *csv)
+{
+    char buf[512];
+    char *save = NULL;
+    char *tok;
+    size_t n;
+
+    ctx->n_allowed_subsys = 0;
+    if (!csv || !csv[0]) {
+        snprintf(ctx->allowed_subsys[0], sizeof(ctx->allowed_subsys[0]), "%s",
+                 CHSSH_SUBSYSTEM_NETCONF);
+        ctx->n_allowed_subsys = 1;
+        return;
+    }
+    n = strlen(csv);
+    if (n >= sizeof(buf)) {
+        n = sizeof(buf) - 1;
+    }
+    memcpy(buf, csv, n);
+    buf[n] = '\0';
+    for (tok = strtok_r(buf, ", \t", &save); tok;
+         tok = strtok_r(NULL, ", \t", &save)) {
+        if (ctx->n_allowed_subsys >= CHSSH_MAX_ALLOWED_SUBSYS) {
+            break;
+        }
+        snprintf(ctx->allowed_subsys[ctx->n_allowed_subsys],
+                 sizeof(ctx->allowed_subsys[0]), "%s", tok);
+        ctx->n_allowed_subsys++;
+    }
+    if (ctx->n_allowed_subsys == 0) {
+        snprintf(ctx->allowed_subsys[0], sizeof(ctx->allowed_subsys[0]), "%s",
+                 CHSSH_SUBSYSTEM_NETCONF);
+        ctx->n_allowed_subsys = 1;
+    }
+}
+
+static int send_window_adjust_ch(chssh_ctx_t *ctx, chssh_channel_t *ch,
+                                 uint32_t bytes)
 {
     uint8_t pl[9];
     size_t off = 0;
-    if (!ctx || bytes == 0 || !ctx->channel_ready) {
+    if (!ctx || !ch || bytes == 0) {
         return 0;
     }
     pl[off++] = CHSSH_MSG_CHANNEL_WINDOW_ADJUST;
-    put_u32(pl + off, ctx->peer_channel);
+    put_u32(pl + off, ch->peer_id);
     off += 4;
     put_u32(pl + off, bytes);
     off += 4;
     if (chssh_i_send_packet(ctx, pl, off) != 0) {
         return -1;
     }
-    ctx->local_window += bytes;
+    ch->local_window += bytes;
     return 0;
 }
 
 /** After consuming peer CHANNEL_DATA, replenish RX window when low. */
-static int maybe_replenish_local_window(chssh_ctx_t *ctx, uint32_t consumed)
+static int maybe_replenish_local_window(chssh_ctx_t *ctx, chssh_channel_t *ch,
+                                        uint32_t consumed)
 {
     uint32_t target;
     uint32_t add;
-    if (!ctx || consumed == 0) {
+    if (!ctx || !ch || consumed == 0) {
         return 0;
     }
-    if (ctx->local_window >= consumed) {
-        ctx->local_window -= consumed;
+    if (ch->local_window >= consumed) {
+        ch->local_window -= consumed;
     } else {
-        ctx->local_window = 0;
+        ch->local_window = 0;
     }
-    target = (uint32_t)ctx->cfg.max_channel_size;
-    if (target == 0) {
-        target = (uint32_t)CHSSH_DEFAULT_CHANNEL;
-    }
+    target = default_channel_window(ctx);
     /*
      * Replenish aggressively for large NETCONF transfers (get-config).
      * Waiting until half-empty stalls peers that buffer multi-MB replies.
      * Top up whenever we drop below 75% of target (or any time window is 0).
      */
-    if (ctx->local_window > (target - target / 4) && ctx->local_window > 0) {
+    if (ch->local_window > (target - target / 4) && ch->local_window > 0) {
         return 0;
     }
-    add = target - ctx->local_window;
+    add = target - ch->local_window;
     if (add == 0) {
         return 0;
     }
-    if (add < 32768u && ctx->local_window > 65536u) {
+    if (add < 32768u && ch->local_window > 65536u) {
         return 0; /* skip tiny top-ups while still comfortably stocked */
     }
-    return send_window_adjust(ctx, add);
+    return send_window_adjust_ch(ctx, ch, add);
 }
 
-static int send_channel_open_session(chssh_ctx_t *ctx)
+static int send_channel_open_session_slot(chssh_ctx_t *ctx, chssh_channel_t *ch)
 {
     uint8_t pl[64];
     size_t off = 0;
     const char *t = "session";
     size_t n = strlen(t);
-    uint32_t win = (uint32_t)ctx->cfg.max_channel_size;
-    if (win == 0) {
-        win = (uint32_t)CHSSH_DEFAULT_CHANNEL;
-    }
-    ctx->local_channel = 0;
-    ctx->local_window = win;
-    ctx->local_max_packet = 32768;
+    uint32_t win = default_channel_window(ctx);
+
+    ch->local_window = win;
+    ch->local_max_packet = 32768;
+    ch->state = CHSSH_CH_OPENING;
+
     pl[off++] = CHSSH_MSG_CHANNEL_OPEN;
     put_u32(pl + off, (uint32_t)n);
     off += 4;
     memcpy(pl + off, t, n);
     off += n;
-    put_u32(pl + off, ctx->local_channel);
+    put_u32(pl + off, ch->local_id);
     off += 4;
     put_u32(pl + off, win);
     off += 4;
-    put_u32(pl + off, ctx->local_max_packet);
+    put_u32(pl + off, ch->local_max_packet);
     off += 4;
     return chssh_i_send_packet(ctx, pl, off);
 }
 
-static int send_subsystem_request(chssh_ctx_t *ctx)
+static int send_subsystem_request_ch(chssh_ctx_t *ctx, chssh_channel_t *ch,
+                                     const char *sub)
 {
     uint8_t pl[128];
     size_t off = 0;
     const char *req = "subsystem";
-    const char *sub = CHSSH_SUBSYSTEM_NETCONF;
-    size_t nr = strlen(req), ns = strlen(sub);
+    size_t nr = strlen(req), ns;
+    char name[CHSSH_SUBSYS_NAME_MAX + 1];
+    if (!sub || !sub[0]) {
+        return -1;
+    }
+    ns = strlen(sub);
+    if (ns > CHSSH_SUBSYS_NAME_MAX) {
+        return -1;
+    }
+    /* Copy first: callers may pass ch->pending_subsystem (no overlap UB). */
+    memcpy(name, sub, ns);
+    name[ns] = '\0';
+    memcpy(ch->pending_subsystem, name, ns + 1);
     pl[off++] = CHSSH_MSG_CHANNEL_REQUEST;
-    put_u32(pl + off, ctx->peer_channel);
+    put_u32(pl + off, ch->peer_id);
     off += 4;
     put_u32(pl + off, (uint32_t)nr);
     off += 4;
     memcpy(pl + off, req, nr);
     off += nr;
-    pl[off++] = 1;
+    pl[off++] = 1; /* want_reply */
     put_u32(pl + off, (uint32_t)ns);
     off += 4;
-    memcpy(pl + off, sub, ns);
+    memcpy(pl + off, name, ns);
     off += ns;
     return chssh_i_send_packet(ctx, pl, off);
 }
 
-static int mark_ready(chssh_ctx_t *ctx)
+static int mark_channel_ready(chssh_ctx_t *ctx, chssh_channel_t *ch,
+                              const char *sub)
 {
     chssh_event_t ev;
+    if (!ctx || !ch) {
+        return -1;
+    }
+    ch->state = CHSSH_CH_READY;
+    if (sub && sub[0]) {
+        snprintf(ch->subsystem, sizeof(ch->subsystem), "%s", sub);
+    }
+    ch->pending_subsystem[0] = '\0';
     ctx->channel_ready = 1;
     ctx->state = CHSSH_STATE_READY;
+
     memset(&ev, 0, sizeof(ev));
-    ev.type = CHSSH_EVENT_READY;
+    ev.type = CHSSH_EVENT_SUBSYSTEM;
+    ev.u.subsystem.channel_id = ch->local_id;
+    snprintf(ev.u.subsystem.name, sizeof(ev.u.subsystem.name), "%s",
+             ch->subsystem);
     (void)chssh_i_push_event(ctx, &ev);
+
+    /* E7 compat: READY only for netconf */
+    if (strcmp(ch->subsystem, CHSSH_SUBSYSTEM_NETCONF) == 0) {
+        memset(&ev, 0, sizeof(ev));
+        ev.type = CHSSH_EVENT_READY;
+        (void)chssh_i_push_event(ctx, &ev);
+    }
     return 0;
+}
+
+/** Legacy: auto-open netconf after client auth (E7). */
+static int send_channel_open_session(chssh_ctx_t *ctx)
+{
+    chssh_channel_t *ch = channel_alloc(ctx);
+    if (!ch) {
+        chssh_i_set_error(ctx, 20, "no free channel slots");
+        return -1;
+    }
+    ch->local_id = ctx->next_local_id++;
+    snprintf(ch->pending_subsystem, sizeof(ch->pending_subsystem), "%s",
+             CHSSH_SUBSYSTEM_NETCONF);
+    return send_channel_open_session_slot(ctx, ch);
 }
 
 static int peer_offers_ecdh_p256(const chssh_ctx_t *ctx)
@@ -1096,7 +1244,9 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
             memset(&ev, 0, sizeof(ev));
             ev.type = CHSSH_EVENT_AUTHENTICATED;
             (void)chssh_i_push_event(ctx, &ev);
-            return send_channel_open_session(ctx);
+            if (ctx->auto_open_netconf) {
+                return send_channel_open_session(ctx);
+            }
         }
         return 0;
     case CHSSH_MSG_USERAUTH_FAILURE:
@@ -1105,22 +1255,66 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
     case CHSSH_MSG_CHANNEL_OPEN:
         if (ctx->role == CHSSH_ROLE_SERVER && len >= 5) {
             size_t o = 1;
-            uint32_t n, peer_ch;
+            uint32_t n, peer_ch, peer_win, peer_max;
             uint8_t conf[32];
             size_t co = 0;
+            chssh_channel_t *ch;
+            char ctype[32];
             n = get_u32(p + o);
-            o += 4 + n;
+            o += 4;
+            if (o + n > len || n >= sizeof(ctype)) {
+                return 0;
+            }
+            memcpy(ctype, p + o, n);
+            ctype[n] = '\0';
+            o += n;
+            if (o + 12 > len) {
+                return 0;
+            }
             peer_ch = get_u32(p + o);
-            ctx->peer_channel = peer_ch;
-            ctx->local_channel = 0;
+            o += 4;
+            peer_win = get_u32(p + o);
+            o += 4;
+            peer_max = get_u32(p + o);
+            if (strcmp(ctype, "session") != 0) {
+                /* reject non-session for now */
+                uint8_t fail[32];
+                size_t fo = 0;
+                const char *reason = "unknown channel type";
+                size_t rn = strlen(reason);
+                fail[fo++] = CHSSH_MSG_CHANNEL_OPEN_FAILURE;
+                put_u32(fail + fo, peer_ch);
+                fo += 4;
+                put_u32(fail + fo, 3); /* SSH_OPEN_UNKNOWN_CHANNEL_TYPE */
+                fo += 4;
+                put_u32(fail + fo, (uint32_t)rn);
+                fo += 4;
+                memcpy(fail + fo, reason, rn);
+                fo += rn;
+                put_u32(fail + fo, 0);
+                fo += 4;
+                (void)chssh_i_send_packet(ctx, fail, fo);
+                return 0;
+            }
+            ch = channel_alloc(ctx);
+            if (!ch) {
+                return 0;
+            }
+            ch->local_id = ctx->next_local_id++;
+            ch->peer_id = peer_ch;
+            ch->remote_window = peer_win;
+            ch->remote_max_packet = peer_max ? peer_max : 32768;
+            ch->local_window = default_channel_window(ctx);
+            ch->local_max_packet = 32768;
+            ch->state = CHSSH_CH_OPEN;
             conf[co++] = CHSSH_MSG_CHANNEL_OPEN_CONFIRM;
             put_u32(conf + co, peer_ch);
             co += 4;
-            put_u32(conf + co, ctx->local_channel);
+            put_u32(conf + co, ch->local_id);
             co += 4;
-            put_u32(conf + co, (uint32_t)ctx->cfg.max_channel_size);
+            put_u32(conf + co, ch->local_window);
             co += 4;
-            put_u32(conf + co, 32768);
+            put_u32(conf + co, ch->local_max_packet);
             co += 4;
             if (chssh_i_send_packet(ctx, conf, co) != 0) {
                 return -1;
@@ -1128,37 +1322,58 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
             ctx->state = CHSSH_STATE_CHANNEL;
             memset(&ev, 0, sizeof(ev));
             ev.type = CHSSH_EVENT_CHANNEL_OPEN;
+            ev.u.channel.channel_id = ch->local_id;
+            snprintf(ev.u.channel.chan_type, sizeof(ev.u.channel.chan_type),
+                     "%s", ctype);
             (void)chssh_i_push_event(ctx, &ev);
         }
         return 0;
     case CHSSH_MSG_CHANNEL_OPEN_CONFIRM:
         if (ctx->role == CHSSH_ROLE_CLIENT && len >= 17) {
-            /* type | recipient | sender | window | max_packet */
-            ctx->peer_channel = get_u32(p + 5);
-            ctx->remote_window = get_u32(p + 9);
-            ctx->remote_max_packet = get_u32(p + 13);
+            /* recipient(local) | sender(peer) | window | max_packet */
+            uint32_t local_id = get_u32(p + 1);
+            chssh_channel_t *ch = channel_by_local(ctx, local_id);
+            if (!ch || ch->state != CHSSH_CH_OPENING) {
+                return 0;
+            }
+            ch->peer_id = get_u32(p + 5);
+            ch->remote_window = get_u32(p + 9);
+            ch->remote_max_packet = get_u32(p + 13);
+            ch->state = CHSSH_CH_OPEN;
             memset(&ev, 0, sizeof(ev));
             ev.type = CHSSH_EVENT_CHANNEL_OPEN;
+            ev.u.channel.channel_id = ch->local_id;
+            snprintf(ev.u.channel.chan_type, sizeof(ev.u.channel.chan_type),
+                     "session");
             (void)chssh_i_push_event(ctx, &ev);
-            return send_subsystem_request(ctx);
+            if (ch->pending_subsystem[0]) {
+                return send_subsystem_request_ch(ctx, ch, ch->pending_subsystem);
+            }
         }
         return 0;
     case CHSSH_MSG_CHANNEL_WINDOW_ADJUST:
         if (len >= 9) {
+            uint32_t local_id = get_u32(p + 1);
             uint32_t add = get_u32(p + 5);
-            ctx->remote_window += add;
+            chssh_channel_t *ch = channel_by_local(ctx, local_id);
+            if (ch) {
+                ch->remote_window += add;
+            }
         }
         return 0;
     case CHSSH_MSG_CHANNEL_REQUEST:
         if (ctx->role == CHSSH_ROLE_SERVER && len >= 10) {
             size_t o = 1;
-            uint32_t rn;
+            uint32_t local_id, rn;
             char req[32];
             uint8_t want;
+            chssh_channel_t *ch;
+            local_id = get_u32(p + o);
             o += 4;
+            ch = channel_by_local(ctx, local_id);
             rn = get_u32(p + o);
             o += 4;
-            if (o + rn > len || rn >= sizeof(req)) {
+            if (!ch || o + rn > len || rn >= sizeof(req)) {
                 return 0;
             }
             memcpy(req, p + o, rn);
@@ -1168,53 +1383,93 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
             if (strcmp(req, "subsystem") == 0 && o + 4 <= len) {
                 uint32_t sn = get_u32(p + o);
                 o += 4;
-                if (o + sn <= len && sn < 64) {
-                    char sub[64];
+                if (o + sn <= len && sn <= CHSSH_SUBSYS_NAME_MAX) {
+                    char sub[CHSSH_SUBSYS_NAME_MAX + 1];
                     memcpy(sub, p + o, sn);
                     sub[sn] = '\0';
-                    memset(&ev, 0, sizeof(ev));
-                    ev.type = CHSSH_EVENT_SUBSYSTEM;
-                    snprintf(ev.u.subsystem.name, sizeof(ev.u.subsystem.name),
-                             "%s", sub);
-                    (void)chssh_i_push_event(ctx, &ev);
-                    if (strcmp(sub, CHSSH_SUBSYSTEM_NETCONF) == 0) {
+                    if (subsystem_allowed(ctx, sub)) {
                         if (want) {
                             uint8_t pl[5];
                             pl[0] = CHSSH_MSG_CHANNEL_SUCCESS;
-                            put_u32(pl + 1, ctx->peer_channel);
+                            put_u32(pl + 1, ch->peer_id);
                             if (chssh_i_send_packet(ctx, pl, 5) != 0) {
                                 return -1;
                             }
                         }
-                        return mark_ready(ctx);
+                        return mark_channel_ready(ctx, ch, sub);
+                    }
+                    if (want) {
+                        uint8_t pl[5];
+                        pl[0] = CHSSH_MSG_CHANNEL_FAILURE;
+                        put_u32(pl + 1, ch->peer_id);
+                        (void)chssh_i_send_packet(ctx, pl, 5);
                     }
                 }
             }
         }
         return 0;
     case CHSSH_MSG_CHANNEL_SUCCESS:
-        if (ctx->role == CHSSH_ROLE_CLIENT) {
-            memset(&ev, 0, sizeof(ev));
-            ev.type = CHSSH_EVENT_SUBSYSTEM;
-            snprintf(ev.u.subsystem.name, sizeof(ev.u.subsystem.name), "%s",
-                     CHSSH_SUBSYSTEM_NETCONF);
-            (void)chssh_i_push_event(ctx, &ev);
-            return mark_ready(ctx);
+        if (ctx->role == CHSSH_ROLE_CLIENT && len >= 5) {
+            uint32_t local_id = get_u32(p + 1);
+            chssh_channel_t *ch = channel_by_local(ctx, local_id);
+            const char *sub;
+            if (!ch) {
+                return 0;
+            }
+            sub = ch->pending_subsystem[0] ? ch->pending_subsystem
+                                           : CHSSH_SUBSYSTEM_NETCONF;
+            return mark_channel_ready(ctx, ch, sub);
+        }
+        return 0;
+    case CHSSH_MSG_CHANNEL_FAILURE:
+        if (ctx->role == CHSSH_ROLE_CLIENT && len >= 5) {
+            chssh_i_set_error(ctx, 21, "channel request failure");
+            return -1;
         }
         return 0;
     case CHSSH_MSG_CHANNEL_DATA:
         if (len >= 9) {
+            uint32_t local_id = get_u32(p + 1);
             uint32_t dlen = get_u32(p + 5);
-            if (9 + dlen <= len && dlen <= CHSSH_DATA_MAX) {
+            chssh_channel_t *ch = channel_by_local(ctx, local_id);
+            if (ch && 9 + dlen <= len && dlen <= CHSSH_DATA_MAX) {
                 memset(&ev, 0, sizeof(ev));
                 ev.type = CHSSH_EVENT_CHANNEL_DATA;
+                ev.u.data.channel_id = ch->local_id;
                 memcpy(ev.u.data.data, p + 9, dlen);
                 ev.u.data.len = dlen;
                 (void)chssh_i_push_event(ctx, &ev);
                 /* RFC 4254: consumer must WINDOW_ADJUST or peer stalls/closes. */
-                if (maybe_replenish_local_window(ctx, dlen) != 0) {
+                if (maybe_replenish_local_window(ctx, ch, dlen) != 0) {
                     return -1;
                 }
+            }
+        }
+        return 0;
+    case CHSSH_MSG_CHANNEL_EOF:
+        if (len >= 5) {
+            uint32_t local_id = get_u32(p + 1);
+            chssh_channel_t *ch = channel_by_local(ctx, local_id);
+            if (ch) {
+                ch->state = CHSSH_CH_EOF_RCVD;
+                memset(&ev, 0, sizeof(ev));
+                ev.type = CHSSH_EVENT_CHANNEL_EOF;
+                ev.u.channel.channel_id = ch->local_id;
+                (void)chssh_i_push_event(ctx, &ev);
+            }
+        }
+        return 0;
+    case CHSSH_MSG_CHANNEL_CLOSE:
+        if (len >= 5) {
+            uint32_t local_id = get_u32(p + 1);
+            chssh_channel_t *ch = channel_by_local(ctx, local_id);
+            if (ch) {
+                memset(&ev, 0, sizeof(ev));
+                ev.type = CHSSH_EVENT_CHANNEL_CLOSE;
+                ev.u.channel.channel_id = ch->local_id;
+                (void)chssh_i_push_event(ctx, &ev);
+                memset(ch, 0, sizeof(*ch));
+                ch->state = CHSSH_CH_FREE;
             }
         }
         return 0;
@@ -1467,9 +1722,28 @@ chssh_ctx_t *chssh_create(chssh_role_t role, const chssh_config_t *cfg)
     ctx->cfg.client_password =
         cfg_dup(ctx, cfg ? cfg->client_password : NULL);
     ctx->cfg.host_key_path = cfg_dup(ctx, cfg ? cfg->host_key_path : NULL);
+    ctx->cfg.allowed_subsystems =
+        cfg_dup(ctx, cfg ? cfg->allowed_subsystems : NULL);
 
     ctx->hold_ident = cfg ? cfg->hold_ident : 0;
     ctx->lab_mode = cfg ? cfg->lab_mode : 0;
+    /*
+     * auto_open_netconf defaults ON for E7 / zero-init configs.
+     * Set auto_open_netconf=0 together with allowed_subsystems for CPE
+     * multi-channel clients (app opens sessions after AUTHENTICATED).
+     */
+    if (!cfg) {
+        ctx->auto_open_netconf = 1;
+    } else if (cfg->auto_open_netconf) {
+        ctx->auto_open_netconf = 1;
+    } else if (cfg->allowed_subsystems && cfg->allowed_subsystems[0]) {
+        ctx->auto_open_netconf = 0;
+    } else {
+        ctx->auto_open_netconf = 1;
+    }
+    parse_allowed_subsystems(ctx, cfg ? cfg->allowed_subsystems : NULL);
+    ctx->next_local_id = 0;
+    memset(ctx->channels, 0, sizeof(ctx->channels));
 
     ident = (cfg && cfg->ident && cfg->ident[0]) ? cfg->ident
                                                  : CHSSH_DEFAULT_IDENT;
@@ -1686,21 +1960,68 @@ int chssh_auth_decide(chssh_ctx_t *ctx, int accept)
     return 0;
 }
 
-int chssh_channel_send(chssh_ctx_t *ctx, const uint8_t *data, size_t len)
+int chssh_channel_open_session(chssh_ctx_t *ctx, uint32_t *local_id_out)
+{
+    chssh_channel_t *ch;
+    if (!ctx || !ctx->auth_ok || ctx->error) {
+        return -1;
+    }
+    if (ctx->state != CHSSH_STATE_CHANNEL && ctx->state != CHSSH_STATE_READY &&
+        ctx->state != CHSSH_STATE_AUTH) {
+        /* allow after auth */
+        if (!ctx->auth_ok) {
+            return -1;
+        }
+    }
+    ch = channel_alloc(ctx);
+    if (!ch) {
+        return -1;
+    }
+    ch->local_id = ctx->next_local_id++;
+    if (send_channel_open_session_slot(ctx, ch) != 0) {
+        memset(ch, 0, sizeof(*ch));
+        return -1;
+    }
+    ctx->state = CHSSH_STATE_CHANNEL;
+    if (local_id_out) {
+        *local_id_out = ch->local_id;
+    }
+    return 0;
+}
+
+int chssh_channel_request_subsystem(chssh_ctx_t *ctx, uint32_t local_id,
+                                    const char *name)
+{
+    chssh_channel_t *ch;
+    if (!ctx || !name || !name[0] || ctx->error) {
+        return -1;
+    }
+    ch = channel_by_local(ctx, local_id);
+    if (!ch || ch->state != CHSSH_CH_OPEN) {
+        return -1;
+    }
+    return send_subsystem_request_ch(ctx, ch, name);
+}
+
+int chssh_channel_send_id(chssh_ctx_t *ctx, uint32_t local_id,
+                          const uint8_t *data, size_t len)
 {
     uint8_t pl[CHSSH_DATA_MAX + 16];
     size_t off = 0;
-    if (!ctx || !ctx->channel_ready || !data || len == 0 ||
-        len > CHSSH_DATA_MAX) {
+    chssh_channel_t *ch;
+    if (!ctx || !data || len == 0 || len > CHSSH_DATA_MAX) {
         return -1;
     }
-    if (!ctx->lab_mode && ctx->remote_window < len) {
-        /* Peer has not granted enough window; refuse rather than violate RFC. */
+    ch = channel_by_local(ctx, local_id);
+    if (!ch || ch->state != CHSSH_CH_READY) {
+        return -1;
+    }
+    if (!ctx->lab_mode && ch->remote_window < len) {
         chssh_i_set_error(ctx, 23, "channel send: remote window exhausted");
         return -1;
     }
     pl[off++] = CHSSH_MSG_CHANNEL_DATA;
-    put_u32(pl + off, ctx->peer_channel);
+    put_u32(pl + off, ch->peer_id);
     off += 4;
     put_u32(pl + off, (uint32_t)len);
     off += 4;
@@ -1709,8 +2030,36 @@ int chssh_channel_send(chssh_ctx_t *ctx, const uint8_t *data, size_t len)
     if (chssh_i_send_packet(ctx, pl, off) != 0) {
         return -1;
     }
-    if (!ctx->lab_mode && ctx->remote_window >= len) {
-        ctx->remote_window -= (uint32_t)len;
+    if (!ctx->lab_mode && ch->remote_window >= len) {
+        ch->remote_window -= (uint32_t)len;
+    }
+    return 0;
+}
+
+int chssh_channel_send(chssh_ctx_t *ctx, const uint8_t *data, size_t len)
+{
+    chssh_channel_t *ch;
+    if (!ctx || !ctx->channel_ready) {
+        return -1;
+    }
+    ch = channel_primary_ready(ctx);
+    if (!ch) {
+        return -1;
+    }
+    return chssh_channel_send_id(ctx, ch->local_id, data, len);
+}
+
+int chssh_channel_is_ready(const chssh_ctx_t *ctx, uint32_t local_id)
+{
+    size_t i;
+    if (!ctx) {
+        return 0;
+    }
+    for (i = 0; i < CHSSH_MAX_CHANNELS; i++) {
+        if (ctx->channels[i].state == CHSSH_CH_READY &&
+            ctx->channels[i].local_id == local_id) {
+            return 1;
+        }
     }
     return 0;
 }

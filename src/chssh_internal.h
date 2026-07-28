@@ -40,11 +40,34 @@
 #define CHSSH_MSG_CHANNEL_SUCCESS       99
 #define CHSSH_MSG_CHANNEL_FAILURE       100
 
+#define CHSSH_MAX_ALLOWED_SUBSYS 8
+
+typedef enum {
+    CHSSH_CH_FREE = 0,
+    CHSSH_CH_OPENING, /* we sent OPEN, waiting for confirm */
+    CHSSH_CH_OPEN,    /* confirmed; subsystem optional */
+    CHSSH_CH_READY,   /* subsystem accepted */
+    CHSSH_CH_EOF_RCVD,
+    CHSSH_CH_CLOSED
+} chssh_ch_state_t;
+
+typedef struct {
+    chssh_ch_state_t state;
+    uint32_t local_id;
+    uint32_t peer_id;
+    uint32_t local_window;  /* remaining RX window we advertised */
+    uint32_t remote_window; /* remaining TX window peer advertised */
+    uint32_t local_max_packet;
+    uint32_t remote_max_packet;
+    char pending_subsystem[CHSSH_SUBSYS_NAME_MAX + 1];
+    char subsystem[CHSSH_SUBSYS_NAME_MAX + 1];
+} chssh_channel_t;
+
 struct chssh_ctx {
     chssh_role_t  role;
     chssh_state_t state;
     chssh_config_t cfg;
-    char cfg_store[1024];
+    char cfg_store[2048];
     size_t cfg_store_used;
 
     char local_ident[CHSSH_IDENT_MAX + 1];
@@ -62,15 +85,16 @@ struct chssh_ctx {
     int newkeys_sent;
     int newkeys_received;
     int auth_ok;
-    int channel_ready;
+    int channel_ready; /* 1 if any channel READY (or netconf for E7) */
     int strict_kex; /* both peers offered kex-strict-* markers */
+    int auto_open_netconf;
 
-    uint32_t local_channel;
-    uint32_t peer_channel;
-    uint32_t local_window;  /* remaining RX window we advertised to peer */
-    uint32_t remote_window; /* remaining TX window peer advertised to us */
-    uint32_t local_max_packet;
-    uint32_t remote_max_packet;
+    chssh_channel_t channels[CHSSH_MAX_CHANNELS];
+    uint32_t next_local_id;
+
+    int n_allowed_subsys;
+    char allowed_subsys[CHSSH_MAX_ALLOWED_SUBSYS][CHSSH_SUBSYS_NAME_MAX + 1];
+
     uint32_t send_seq;
     uint32_t recv_seq;
 

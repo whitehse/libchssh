@@ -3,7 +3,11 @@
  * @brief Call Home SSH transport (RFC 8071) — pure plumbing API.
  *
  * System-call free, callback free. Caller owns sockets and policy.
- * Specialized for NETCONF subsystem "netconf" after SSH is ready.
+ *
+ * Channels: session channels with named subsystems. Default client path
+ * auto-opens subsystem "netconf" (E7). Set auto_open_netconf=0 and use
+ * chssh_channel_open_session + chssh_channel_request_subsystem for CPE
+ * multi-service call-home (ADR 015).
  *
  * Roles (SSH layer; orthogonal to NETCONF app roles):
  *   CHSSH_ROLE_SERVER — NMS after TCP accept (RFC 8071 Call Home)
@@ -21,7 +25,7 @@ extern "C" {
 #endif
 
 #define CHSSH_VERSION_MAJOR 0
-#define CHSSH_VERSION_MINOR 1
+#define CHSSH_VERSION_MINOR 2
 #define CHSSH_VERSION_PATCH 0
 
 /** Default identification (OpenSSH-like; some field gear rejects exotic idents). */
@@ -29,6 +33,15 @@ extern "C" {
 
 /** Fixed NETCONF subsystem name (RFC 6242). */
 #define CHSSH_SUBSYSTEM_NETCONF "netconf"
+
+/** CPE call-home subsystem names (edgehost design). */
+#define CHSSH_SUBSYSTEM_EDGE_TELEMETRY "edge-telemetry"
+#define CHSSH_SUBSYSTEM_EDGE_PG        "edge-pg"
+#define CHSSH_SUBSYSTEM_EDGE_AI        "edge-ai"
+#define CHSSH_SUBSYSTEM_EDGE_CONTROL   "edge-control"
+
+/** Max concurrent channels per connection (fixed table). */
+#define CHSSH_MAX_CHANNELS 16
 
 /* --- Role: SSH transport role (not NETCONF client/server) --- */
 typedef enum {
@@ -41,7 +54,7 @@ typedef struct {
     size_t      event_queue_size;   /* 0 = default 16 */
     size_t      max_packet_size;    /* 0 = default 256 KiB (SSH binary packet) */
     size_t      max_output_size;    /* 0 = default 256 KiB */
-    size_t      max_channel_size;   /* 0 = default 256 KiB (plaintext NETCONF) */
+    size_t      max_channel_size;   /* 0 = default 256 KiB (plaintext channel) */
 
     /**
      * SSH identification string without CR/LF (default CHSSH_DEFAULT_IDENT).
@@ -74,6 +87,19 @@ typedef struct {
     int allow_none_auth;    /* SERVER lab: allow USERAUTH none */
 
     const char *host_key_path; /* SERVER: PEM path; NULL = ephemeral when possible */
+
+    /**
+     * Comma-separated subsystem allowlist for SERVER (and client policy hint).
+     * NULL or empty → "netconf" only. Example CPE host:
+     * "edge-telemetry,edge-pg,edge-ai,edge-control"
+     */
+    const char *allowed_subsystems;
+
+    /**
+     * CLIENT: after auth, automatically open a session and request "netconf".
+     * Default 1 (E7 path). Set 0 for app-driven multi-channel (CPE call-home).
+     */
+    int auto_open_netconf;
 } chssh_config_t;
 
 typedef struct chssh_ctx chssh_ctx_t;
@@ -84,8 +110,8 @@ typedef enum {
     CHSSH_STATE_KEX,             /* key exchange */
     CHSSH_STATE_SERVICE,         /* service request/accept */
     CHSSH_STATE_AUTH,            /* user authentication */
-    CHSSH_STATE_CHANNEL,         /* session + subsystem */
-    CHSSH_STATE_READY,           /* netconf channel open — app data */
+    CHSSH_STATE_CHANNEL,         /* session + subsystem(s) */
+    CHSSH_STATE_READY,           /* netconf (or multi-channel) active */
     CHSSH_STATE_CLOSING,
     CHSSH_STATE_CLOSED,
     CHSSH_STATE_ERROR
@@ -104,11 +130,13 @@ typedef enum {
     CHSSH_EVENT_AUTH_NONE,       /* server: peer tried none */
     CHSSH_EVENT_AUTHENTICATED,
 
-    CHSSH_EVENT_CHANNEL_OPEN,    /* session channel open */
-    CHSSH_EVENT_SUBSYSTEM,       /* subsystem request (server) or ready (client) */
-    CHSSH_EVENT_READY,           /* netconf channel ready for app data */
+    CHSSH_EVENT_CHANNEL_OPEN,    /* session channel open (u.channel) */
+    CHSSH_EVENT_SUBSYSTEM,       /* subsystem request/ready (u.subsystem) */
+    CHSSH_EVENT_READY,           /* netconf channel ready (E7 compat) */
 
-    CHSSH_EVENT_CHANNEL_DATA,    /* plaintext NETCONF bytes in event.data */
+    CHSSH_EVENT_CHANNEL_DATA,    /* plaintext bytes (u.data) */
+    CHSSH_EVENT_CHANNEL_EOF,     /* peer EOF on channel (u.channel) */
+    CHSSH_EVENT_CHANNEL_CLOSE,   /* channel closed (u.channel) */
     CHSSH_EVENT_DISCONNECTED,
     CHSSH_EVENT_ERROR
 } chssh_event_type_t;
@@ -118,6 +146,7 @@ typedef enum {
 #define CHSSH_PASS_MAX  256
 #define CHSSH_ERROR_MAX 256
 #define CHSSH_DATA_MAX  (64 * 1024)
+#define CHSSH_SUBSYS_NAME_MAX 63
 
 typedef struct {
     chssh_event_type_t type;
@@ -131,9 +160,15 @@ typedef struct {
             char     password[CHSSH_PASS_MAX + 1];
         } auth;
         struct {
-            char     name[64]; /* e.g. "netconf" */
+            uint32_t channel_id; /* local channel id */
+            char     name[CHSSH_SUBSYS_NAME_MAX + 1];
         } subsystem;
         struct {
+            uint32_t channel_id; /* local channel id */
+            char     chan_type[32]; /* e.g. "session" */
+        } channel;
+        struct {
+            uint32_t channel_id; /* local channel id */
             uint8_t  data[CHSSH_DATA_MAX];
             size_t   len;
         } data;
@@ -147,7 +182,8 @@ typedef struct {
 /* --- Lifecycle --- */
 
 /**
- * Create context. @p cfg may be NULL (defaults: lab_mode=0, hold_ident=0).
+ * Create context. @p cfg may be NULL (defaults: lab_mode=0, hold_ident=0,
+ * auto_open_netconf=1, allowed_subsystems=netconf).
  * Returns NULL on allocation failure or unsupported config.
  */
 chssh_ctx_t *chssh_create(chssh_role_t role, const chssh_config_t *cfg);
@@ -194,12 +230,40 @@ int chssh_peer_ident_seen(const chssh_ctx_t *ctx);
  */
 int chssh_auth_decide(chssh_ctx_t *ctx, int accept);
 
+/* --- Multi-channel API (ADR 015) --- */
+
 /**
- * After CHSSH_STATE_READY: queue plaintext for the netconf channel
- * (encrypted on the wire in production mode; clear in lab_mode).
- * @return 0 ok, -1 not ready / overflow.
+ * After authentication: open a session channel.
+ * On success fills @p local_id_out with the local channel id.
+ * Client: sends CHANNEL_OPEN. Server: not typical (use for reverse shell later).
+ * @return 0 ok, -1 error.
+ */
+int chssh_channel_open_session(chssh_ctx_t *ctx, uint32_t *local_id_out);
+
+/**
+ * Request subsystem @p name on an open session channel (after OPEN confirm).
+ * Name must be on the server allowlist when we are server (peer request);
+ * client may request any name (server enforces).
+ * @return 0 ok, -1 error.
+ */
+int chssh_channel_request_subsystem(chssh_ctx_t *ctx, uint32_t local_id,
+                                    const char *name);
+
+/**
+ * Queue plaintext for a specific channel (encrypted on wire in production).
+ * @return 0 ok, -1 not ready / overflow / window.
+ */
+int chssh_channel_send_id(chssh_ctx_t *ctx, uint32_t local_id,
+                          const uint8_t *data, size_t len);
+
+/**
+ * Send on the primary ready channel (first READY). E7/netconf compat wrapper.
+ * Prefer chssh_channel_send_id for multi-channel.
  */
 int chssh_channel_send(chssh_ctx_t *ctx, const uint8_t *data, size_t len);
+
+/** 1 if @p local_id is open and subsystem accepted (or netconf READY). */
+int chssh_channel_is_ready(const chssh_ctx_t *ctx, uint32_t local_id);
 
 /**
  * Send a transport keepalive after keys are active (post-NEWKEYS).

@@ -67,10 +67,17 @@ IDENT → KEX → SERVICE → AUTH → CHANNEL → READY → CLOSED
 - Embedded event payloads (copy-safe).
 - Strict C11 + pedantic warnings as errors.
 
+## Multi-channel (ADR 015)
+
+Channel table (fixed max) supports concurrent session channels and named
+subsystems beyond `netconf` (CPE: `edge-telemetry`, `edge-pg`, `edge-ai`,
+`edge-control`). Default client still auto-opens `netconf` for E7
+(`auto_open_netconf=1`).
+
 ## Deliberate absences
 
 - curve25519 / ed25519 (RSA preferred for field OLTs first).
-- Port forwarding, shell, sftp, agent forwarding.
+- Port forwarding, sftp, agent forwarding (shell opens for staff: follow-on).
 - Calix identity XML (host/edgehost).
 - NETCONF XML framing (libnetconf).
-- known_hosts pinning (client accepts any when `accept_any_hostkey`).
+- known_hosts pinning (client accepts any when `accept_any_hostkey`; pin API later).

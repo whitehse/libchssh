@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(libchssh LANGUAGES C VERSION 0.1.0)
+project(libchssh LANGUAGES C VERSION 0.2.0)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -53,6 +53,10 @@ add_test(NAME chssh_smoke COMMAND chssh_smoke_test)
 add_executable(chssh_dialectic_test tests/test_chssh_dialectic.c)
 target_link_libraries(chssh_dialectic_test PRIVATE chssh)
 add_test(NAME chssh_dialectic COMMAND chssh_dialectic_test)
+
+add_executable(chssh_multi_channel_test tests/test_chssh_multi_channel.c)
+target_link_libraries(chssh_multi_channel_test PRIVATE chssh)
+add_test(NAME chssh_multi_channel COMMAND chssh_multi_channel_test)
 
 add_executable(chssh_hold_ident_test tests/test_chssh_hold_ident.c)
 target_link_libraries(chssh_hold_ident_test PRIVATE chssh)
