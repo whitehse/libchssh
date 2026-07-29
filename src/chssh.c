@@ -948,10 +948,14 @@ static int accept_session_open(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
     o += 4;
     peer_max = get_u32(p + o);
     if (strcmp(ctype, "session") != 0) {
-        uint8_t fail[32];
+        /* msg + peer_ch + reason_code + desc_len + desc + lang_len */
+        uint8_t fail[64];
         size_t fo = 0;
         const char *reason = "unknown channel type";
         size_t rn = strlen(reason);
+        if (1u + 4u + 4u + 4u + rn + 4u > sizeof(fail)) {
+            return 0;
+        }
         fail[fo++] = CHSSH_MSG_CHANNEL_OPEN_FAILURE;
         put_u32(fail + fo, peer_ch);
         fo += 4;

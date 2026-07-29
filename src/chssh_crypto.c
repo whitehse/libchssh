@@ -5,6 +5,8 @@
 
 #include "chssh_crypto.h"
 
+#if HAVE_OPENSSL
+
 #include <openssl/bn.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -808,3 +810,224 @@ done:
     EVP_PKEY_free(peer);
     return rc;
 }
+
+#else /* !HAVE_OPENSSL — lab_mode dialectic only; production KEX unavailable */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+struct chssh_rsa_key { int dummy; };
+struct chssh_dh_ctx { int dummy; };
+struct chssh_cipher { int dummy; };
+struct chssh_hash_ctx { int dummy; };
+struct chssh_ecdh_ctx { int dummy; };
+
+int chssh_crypto_init(void)
+{
+    return 0;
+}
+
+int chssh_crypto_random(uint8_t *buf, size_t len)
+{
+    size_t i;
+    if (!buf) {
+        return -1;
+    }
+    /* Weak deterministic fill — production path requires OpenSSL. */
+    for (i = 0; i < len; i++) {
+        buf[i] = (uint8_t)(0x5A ^ (unsigned)i);
+    }
+    return 0;
+}
+
+chssh_rsa_key_t *chssh_rsa_generate(int bits)
+{
+    (void)bits;
+    return NULL;
+}
+chssh_rsa_key_t *chssh_rsa_load_pem(const char *path)
+{
+    (void)path;
+    return NULL;
+}
+void chssh_rsa_free(chssh_rsa_key_t *k)
+{
+    free(k);
+}
+int chssh_rsa_public_blob(const chssh_rsa_key_t *k, uint8_t *out, size_t cap,
+                          size_t *out_len)
+{
+    (void)k;
+    (void)out;
+    (void)cap;
+    (void)out_len;
+    return -1;
+}
+int chssh_rsa_sign(const chssh_rsa_key_t *k, const char *sig_alg,
+                   const uint8_t *H, size_t H_len, uint8_t *out, size_t cap,
+                   size_t *out_len)
+{
+    (void)k;
+    (void)sig_alg;
+    (void)H;
+    (void)H_len;
+    (void)out;
+    (void)cap;
+    (void)out_len;
+    return -1;
+}
+int chssh_rsa_verify(const uint8_t *host_key_blob, size_t hk_len,
+                     const uint8_t *sig_blob, size_t sig_len,
+                     const uint8_t *H, size_t H_len)
+{
+    (void)host_key_blob;
+    (void)hk_len;
+    (void)sig_blob;
+    (void)sig_len;
+    (void)H;
+    (void)H_len;
+    return -1;
+}
+chssh_dh_ctx_t *chssh_dh_new(void) { return NULL; }
+void chssh_dh_free(chssh_dh_ctx_t *dh) { free(dh); }
+int chssh_dh_gen_public(chssh_dh_ctx_t *dh, uint8_t *pub, size_t cap,
+                        size_t *pub_len)
+{
+    (void)dh;
+    (void)pub;
+    (void)cap;
+    (void)pub_len;
+    return -1;
+}
+int chssh_dh_compute(chssh_dh_ctx_t *dh, const uint8_t *peer_pub,
+                     size_t peer_len, uint8_t *K, size_t cap, size_t *K_len)
+{
+    (void)dh;
+    (void)peer_pub;
+    (void)peer_len;
+    (void)K;
+    (void)cap;
+    (void)K_len;
+    return -1;
+}
+chssh_ecdh_ctx_t *chssh_ecdh_p256_new(void) { return NULL; }
+void chssh_ecdh_free(chssh_ecdh_ctx_t *e) { free(e); }
+int chssh_ecdh_public_string(chssh_ecdh_ctx_t *e, uint8_t *out, size_t cap,
+                             size_t *out_len)
+{
+    (void)e;
+    (void)out;
+    (void)cap;
+    (void)out_len;
+    return -1;
+}
+int chssh_ecdh_compute(chssh_ecdh_ctx_t *e, const uint8_t *peer_q_str,
+                       size_t peer_len, uint8_t *K, size_t cap, size_t *K_len)
+{
+    (void)e;
+    (void)peer_q_str;
+    (void)peer_len;
+    (void)K;
+    (void)cap;
+    (void)K_len;
+    return -1;
+}
+int chssh_sha256(const uint8_t *data, size_t len, uint8_t out[CHSSH_HASH_LEN])
+{
+    (void)data;
+    (void)len;
+    if (out) {
+        memset(out, 0, CHSSH_HASH_LEN);
+    }
+    return -1;
+}
+chssh_hash_ctx_t *chssh_hash_new(void) { return NULL; }
+void chssh_hash_free(chssh_hash_ctx_t *h) { free(h); }
+int chssh_hash_update(chssh_hash_ctx_t *h, const uint8_t *data, size_t len)
+{
+    (void)h;
+    (void)data;
+    (void)len;
+    return -1;
+}
+int chssh_hash_update_string(chssh_hash_ctx_t *h, const uint8_t *data,
+                             size_t len)
+{
+    (void)h;
+    (void)data;
+    (void)len;
+    return -1;
+}
+int chssh_hash_update_cstring(chssh_hash_ctx_t *h, const char *s)
+{
+    (void)h;
+    (void)s;
+    return -1;
+}
+int chssh_hash_final(chssh_hash_ctx_t *h, uint8_t out[CHSSH_HASH_LEN])
+{
+    (void)h;
+    if (out) {
+        memset(out, 0, CHSSH_HASH_LEN);
+    }
+    return -1;
+}
+int chssh_derive_keys(const uint8_t *K, size_t K_len, const uint8_t *H,
+                      const uint8_t *session_id, size_t session_id_len,
+                      uint8_t iv_c2s[CHSSH_AES_IV_LEN],
+                      uint8_t iv_s2c[CHSSH_AES_IV_LEN],
+                      uint8_t key_c2s[CHSSH_AES_KEY_LEN],
+                      uint8_t key_s2c[CHSSH_AES_KEY_LEN],
+                      uint8_t mac_c2s[CHSSH_MAC_KEY_LEN],
+                      uint8_t mac_s2c[CHSSH_MAC_KEY_LEN])
+{
+    (void)K;
+    (void)K_len;
+    (void)H;
+    (void)session_id;
+    (void)session_id_len;
+    (void)iv_c2s;
+    (void)iv_s2c;
+    (void)key_c2s;
+    (void)key_s2c;
+    (void)mac_c2s;
+    (void)mac_s2c;
+    return -1;
+}
+chssh_cipher_t *chssh_cipher_new(const uint8_t key[CHSSH_AES_KEY_LEN],
+                                 const uint8_t iv[CHSSH_AES_IV_LEN],
+                                 int encrypt)
+{
+    (void)key;
+    (void)iv;
+    (void)encrypt;
+    return NULL;
+}
+chssh_cipher_t *chssh_cipher_dup(const chssh_cipher_t *c)
+{
+    (void)c;
+    return NULL;
+}
+void chssh_cipher_free(chssh_cipher_t *c) { free(c); }
+int chssh_cipher_crypt(chssh_cipher_t *c, uint8_t *data, size_t len)
+{
+    (void)c;
+    (void)data;
+    (void)len;
+    return -1;
+}
+int chssh_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data,
+                      size_t data_len, uint8_t out[CHSSH_MAC_LEN])
+{
+    (void)key;
+    (void)key_len;
+    (void)data;
+    (void)data_len;
+    if (out) {
+        memset(out, 0, CHSSH_MAC_LEN);
+    }
+    return -1;
+}
+
+#endif /* HAVE_OPENSSL */

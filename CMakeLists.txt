@@ -33,6 +33,8 @@ if(OpenSSL_FOUND)
     target_link_libraries(chssh PUBLIC OpenSSL::SSL OpenSSL::Crypto)
     message(STATUS "OpenSSL found (production KEX enabled)")
 else()
+    # Explicit 0 so chssh_crypto.c compiles stubs (lab dialectic only).
+    target_compile_definitions(chssh PUBLIC HAVE_OPENSSL=0)
     message(STATUS "OpenSSL not found; lab_mode dialectic only")
 endif()
 
