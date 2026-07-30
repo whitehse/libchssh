@@ -107,6 +107,14 @@ typedef struct {
      * Lab tests and simple CPE agents may set 1.
      */
     int auto_accept_shell;
+
+    /**
+     * When peer requests pty-req, auto-accept if 1 (reply SUCCESS + event).
+     * Default 1: required for stock OpenSSH interactive clients (they send
+     * pty-req with want_reply before shell). Set 0 only for strict tests.
+     * Note: zero-init configs get default 1 in chssh_create.
+     */
+    int auto_accept_pty;
 } chssh_config_t;
 
 typedef struct chssh_ctx chssh_ctx_t;
@@ -140,6 +148,8 @@ typedef enum {
     CHSSH_EVENT_CHANNEL_OPEN,    /* session channel open (u.channel) */
     CHSSH_EVENT_SUBSYSTEM,       /* subsystem request/ready (u.subsystem) */
     CHSSH_EVENT_SHELL,           /* peer requested shell (u.channel); decide */
+    CHSSH_EVENT_PTY,             /* peer pty-req accepted (u.pty) */
+    CHSSH_EVENT_WINDOW_CHANGE,   /* peer window-change (u.pty dims) */
     CHSSH_EVENT_READY,           /* netconf channel ready (E7 compat) */
 
     CHSSH_EVENT_CHANNEL_DATA,    /* plaintext bytes (u.data) */
@@ -155,6 +165,7 @@ typedef enum {
 #define CHSSH_ERROR_MAX 256
 #define CHSSH_DATA_MAX  (64 * 1024)
 #define CHSSH_SUBSYS_NAME_MAX 63
+#define CHSSH_TERM_MAX  32
 
 typedef struct {
     chssh_event_type_t type;
@@ -175,6 +186,14 @@ typedef struct {
             uint32_t channel_id; /* local channel id */
             char     chan_type[32]; /* e.g. "session" */
         } channel;
+        struct {
+            uint32_t channel_id;
+            char     term[CHSSH_TERM_MAX + 1]; /* empty on window-change */
+            uint32_t cols;
+            uint32_t rows;
+            uint32_t width_px;
+            uint32_t height_px;
+        } pty;
         struct {
             uint32_t channel_id; /* local channel id */
             uint8_t  data[CHSSH_DATA_MAX];
@@ -263,6 +282,15 @@ int chssh_channel_request_subsystem(chssh_ctx_t *ctx, uint32_t local_id,
  * @return 0 ok, -1 error.
  */
 int chssh_channel_request_shell(chssh_ctx_t *ctx, uint32_t local_id);
+
+/**
+ * Request a pseudo-terminal on an open session channel (OpenSSH-compatible
+ * CHANNEL_REQUEST "pty-req"). Peer should accept before shell for interactive
+ * clients. Modes blob is empty (peer may ignore).
+ * @return 0 ok, -1 error.
+ */
+int chssh_channel_request_pty(chssh_ctx_t *ctx, uint32_t local_id,
+                              const char *term, uint32_t cols, uint32_t rows);
 
 /**
  * Accept or reject a pending channel request (shell) after CHSSH_EVENT_SHELL.

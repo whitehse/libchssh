@@ -65,6 +65,13 @@ typedef struct {
     int shell_req_pending;  /* peer asked shell; wait request_decide */
     int shell_want_reply;   /* peer want_reply for pending shell */
     int is_shell;           /* shell channel (staff reverse) */
+    int has_pty;            /* peer (or we) established pty-req */
+    char term[CHSSH_TERM_MAX + 1];
+    uint32_t pty_cols;
+    uint32_t pty_rows;
+    uint32_t pty_width_px;
+    uint32_t pty_height_px;
+    int pending_pty;        /* we sent pty-req; wait SUCCESS */
 } chssh_channel_t;
 
 struct chssh_ctx {
@@ -93,6 +100,7 @@ struct chssh_ctx {
     int strict_kex; /* both peers offered kex-strict-* markers */
     int auto_open_netconf;
     int auto_accept_shell;
+    int auto_accept_pty;
 
     chssh_channel_t channels[CHSSH_MAX_CHANNELS];
     uint32_t next_local_id;

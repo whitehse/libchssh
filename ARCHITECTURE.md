@@ -74,10 +74,25 @@ subsystems beyond `netconf` (CPE: `edge-telemetry`, `edge-pg`, `edge-ai`,
 `edge-control`). Default client still auto-opens `netconf` for E7
 (`auto_open_netconf=1`).
 
+## Interactive shell / PTY (staff reverse)
+
+Channel requests for OpenSSH interactive clients:
+
+| Request | Behavior |
+|---------|----------|
+| `pty-req` | Auto-accept + SUCCESS (want_reply); emit `CHSSH_EVENT_PTY` with term/cols/rows |
+| `shell` | Auto-accept if `auto_accept_shell`, else event + `chssh_channel_request_decide` |
+| `window-change` | Update dims; emit `CHSSH_EVENT_WINDOW_CHANGE`; SUCCESS if want_reply |
+| `env` | SUCCESS if want_reply (values not stored) |
+| other | FAILURE if want_reply (never silent-drop) |
+
+PTY is plumbing only — host/agent owns real `posix_openpt` and `TIOCSWINSZ`.
+
 ## Deliberate absences
 
 - curve25519 / ed25519 (RSA preferred for field OLTs first).
-- Port forwarding, sftp, agent forwarding (shell opens for staff: follow-on).
+- Port forwarding (`tcpip-forward` / `direct-tcpip` / `forwarded-tcpip`) — planned for reverse tunnels.
+- sftp, agent forwarding.
 - Calix identity XML (host/edgehost).
 - NETCONF XML framing (libnetconf).
 - known_hosts pinning (client accepts any when `accept_any_hostkey`; pin API later).

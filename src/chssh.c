@@ -832,6 +832,78 @@ static int send_shell_request_ch(chssh_ctx_t *ctx, chssh_channel_t *ch)
     return chssh_i_send_packet(ctx, pl, off);
 }
 
+/**
+ * RFC 4254 pty-req: term, cols, rows, width_px, height_px, modes string.
+ * Modes are empty (length 0) — peers ignore for lab/staff reverse shell.
+ */
+static int send_pty_request_ch(chssh_ctx_t *ctx, chssh_channel_t *ch,
+                               const char *term, uint32_t cols, uint32_t rows)
+{
+    uint8_t pl[160];
+    size_t off = 0;
+    const char *req = "pty-req";
+    size_t nr = strlen(req);
+    size_t nt;
+    if (!ch || (ch->state != CHSSH_CH_OPEN && ch->state != CHSSH_CH_READY)) {
+        return -1;
+    }
+    if (!term || !term[0]) {
+        term = "xterm";
+    }
+    nt = strlen(term);
+    if (nt > CHSSH_TERM_MAX) {
+        nt = CHSSH_TERM_MAX;
+    }
+    if (cols == 0) {
+        cols = 80;
+    }
+    if (rows == 0) {
+        rows = 24;
+    }
+    ch->pending_pty = 1;
+    snprintf(ch->term, sizeof(ch->term), "%.*s", (int)nt, term);
+    ch->pty_cols = cols;
+    ch->pty_rows = rows;
+    pl[off++] = CHSSH_MSG_CHANNEL_REQUEST;
+    put_u32(pl + off, ch->peer_id);
+    off += 4;
+    put_u32(pl + off, (uint32_t)nr);
+    off += 4;
+    memcpy(pl + off, req, nr);
+    off += nr;
+    pl[off++] = 1; /* want_reply */
+    put_u32(pl + off, (uint32_t)nt);
+    off += 4;
+    memcpy(pl + off, term, nt);
+    off += nt;
+    put_u32(pl + off, cols);
+    off += 4;
+    put_u32(pl + off, rows);
+    off += 4;
+    put_u32(pl + off, 0); /* width_px */
+    off += 4;
+    put_u32(pl + off, 0); /* height_px */
+    off += 4;
+    put_u32(pl + off, 0); /* encoded terminal modes len */
+    off += 4;
+    return chssh_i_send_packet(ctx, pl, off);
+}
+
+static void fill_pty_event(chssh_event_t *ev, chssh_event_type_t type,
+                           const chssh_channel_t *ch)
+{
+    memset(ev, 0, sizeof(*ev));
+    ev->type = type;
+    ev->u.pty.channel_id = ch->local_id;
+    if (ch->term[0]) {
+        snprintf(ev->u.pty.term, sizeof(ev->u.pty.term), "%s", ch->term);
+    }
+    ev->u.pty.cols = ch->pty_cols;
+    ev->u.pty.rows = ch->pty_rows;
+    ev->u.pty.width_px = ch->pty_width_px;
+    ev->u.pty.height_px = ch->pty_height_px;
+}
+
 static int send_channel_req_reply(chssh_ctx_t *ctx, chssh_channel_t *ch,
                                   int success)
 {
@@ -1493,6 +1565,94 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
                 snprintf(ev.u.channel.chan_type, sizeof(ev.u.channel.chan_type),
                          "shell");
                 (void)chssh_i_push_event(ctx, &ev);
+            } else if (strcmp(req, "pty-req") == 0) {
+                /*
+                 * OpenSSH interactive clients always send pty-req with
+                 * want_reply=1 before shell. Must reply or client hangs.
+                 */
+                uint32_t tn = 0;
+                uint32_t cols = 80, rows = 24, wpx = 0, hpx = 0;
+                char term[CHSSH_TERM_MAX + 1];
+                term[0] = '\0';
+                if (o + 4 <= len) {
+                    tn = get_u32(p + o);
+                    o += 4;
+                    if (o + tn <= len && tn > 0) {
+                        size_t copy = tn > CHSSH_TERM_MAX ? CHSSH_TERM_MAX : tn;
+                        memcpy(term, p + o, copy);
+                        term[copy] = '\0';
+                        o += tn;
+                    }
+                    if (o + 16 <= len) {
+                        cols = get_u32(p + o);
+                        o += 4;
+                        rows = get_u32(p + o);
+                        o += 4;
+                        wpx = get_u32(p + o);
+                        o += 4;
+                        hpx = get_u32(p + o);
+                        o += 4;
+                    }
+                    /* skip encoded terminal modes string if present */
+                }
+                if (cols == 0) {
+                    cols = 80;
+                }
+                if (rows == 0) {
+                    rows = 24;
+                }
+                if (ctx->auto_accept_pty) {
+                    ch->has_pty = 1;
+                    ch->pty_cols = cols;
+                    ch->pty_rows = rows;
+                    ch->pty_width_px = wpx;
+                    ch->pty_height_px = hpx;
+                    if (term[0]) {
+                        snprintf(ch->term, sizeof(ch->term), "%s", term);
+                    }
+                    if (want && send_channel_req_reply(ctx, ch, 1) != 0) {
+                        return -1;
+                    }
+                    fill_pty_event(&ev, CHSSH_EVENT_PTY, ch);
+                    (void)chssh_i_push_event(ctx, &ev);
+                } else if (want) {
+                    (void)send_channel_req_reply(ctx, ch, 0);
+                }
+            } else if (strcmp(req, "window-change") == 0) {
+                if (o + 16 <= len) {
+                    ch->pty_cols = get_u32(p + o);
+                    o += 4;
+                    ch->pty_rows = get_u32(p + o);
+                    o += 4;
+                    ch->pty_width_px = get_u32(p + o);
+                    o += 4;
+                    ch->pty_height_px = get_u32(p + o);
+                    if (ch->pty_cols == 0) {
+                        ch->pty_cols = 80;
+                    }
+                    if (ch->pty_rows == 0) {
+                        ch->pty_rows = 24;
+                    }
+                    fill_pty_event(&ev, CHSSH_EVENT_WINDOW_CHANGE, ch);
+                    (void)chssh_i_push_event(ctx, &ev);
+                }
+                if (want && send_channel_req_reply(ctx, ch, 1) != 0) {
+                    return -1;
+                }
+            } else if (strcmp(req, "env") == 0) {
+                /* Accept env requests so OpenSSH clients do not hang. */
+                if (want && send_channel_req_reply(ctx, ch, 1) != 0) {
+                    return -1;
+                }
+            } else {
+                /*
+                 * Unknown channel request: always answer want_reply.
+                 * Silent drop is the historic OpenSSH hang source for pty-req
+                 * before this path handled it; keep discipline for the rest.
+                 */
+                if (want) {
+                    (void)send_channel_req_reply(ctx, ch, 0);
+                }
             }
         }
         return 0;
@@ -1501,6 +1661,13 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
             uint32_t local_id = get_u32(p + 1);
             chssh_channel_t *ch = channel_by_local(ctx, local_id);
             if (!ch) {
+                return 0;
+            }
+            if (ch->pending_pty) {
+                ch->pending_pty = 0;
+                ch->has_pty = 1;
+                fill_pty_event(&ev, CHSSH_EVENT_PTY, ch);
+                (void)chssh_i_push_event(ctx, &ev);
                 return 0;
             }
             if (ch->pending_shell) {
@@ -1842,6 +2009,12 @@ chssh_ctx_t *chssh_create(chssh_role_t role, const chssh_config_t *cfg)
     }
     parse_allowed_subsystems(ctx, cfg ? cfg->allowed_subsystems : NULL);
     ctx->auto_accept_shell = cfg ? (cfg->auto_accept_shell ? 1 : 0) : 0;
+    /*
+     * OpenSSH interactive clients require pty-req SUCCESS before shell.
+     * Always accept (including zero-init configs). The config field is
+     * reserved for a future refuse policy; product staff faces always accept.
+     */
+    ctx->auto_accept_pty = 1;
     ctx->next_local_id = 0;
     memset(ctx->channels, 0, sizeof(ctx->channels));
 
@@ -2122,6 +2295,23 @@ int chssh_channel_request_shell(chssh_ctx_t *ctx, uint32_t local_id)
         return -1;
     }
     return send_shell_request_ch(ctx, ch);
+}
+
+int chssh_channel_request_pty(chssh_ctx_t *ctx, uint32_t local_id,
+                              const char *term, uint32_t cols, uint32_t rows)
+{
+    chssh_channel_t *ch;
+    if (!ctx || ctx->error) {
+        return -1;
+    }
+    ch = channel_by_local(ctx, local_id);
+    if (!ch) {
+        return -1;
+    }
+    if (ch->state != CHSSH_CH_OPEN && ch->state != CHSSH_CH_READY) {
+        return -1;
+    }
+    return send_pty_request_ch(ctx, ch, term, cols, rows);
 }
 
 int chssh_channel_request_decide(chssh_ctx_t *ctx, uint32_t local_id,
