@@ -68,6 +68,10 @@ add_executable(chssh_pty_test tests/test_chssh_pty.c)
 target_link_libraries(chssh_pty_test PRIVATE chssh)
 add_test(NAME chssh_pty COMMAND chssh_pty_test)
 
+add_executable(chssh_forward_test tests/test_chssh_forward.c)
+target_link_libraries(chssh_forward_test PRIVATE chssh)
+add_test(NAME chssh_forward COMMAND chssh_forward_test)
+
 add_executable(chssh_hold_ident_test tests/test_chssh_hold_ident.c)
 target_link_libraries(chssh_hold_ident_test PRIVATE chssh)
 add_test(NAME chssh_hold_ident COMMAND chssh_hold_ident_test)

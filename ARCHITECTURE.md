@@ -91,7 +91,7 @@ PTY is plumbing only — host/agent owns real `posix_openpt` and `TIOCSWINSZ`.
 ## Deliberate absences
 
 - curve25519 / ed25519 (RSA preferred for field OLTs first).
-- Port forwarding (`tcpip-forward` / `direct-tcpip` / `forwarded-tcpip`) — planned for reverse tunnels.
+- ~~Port forwarding~~ — `tcpip-forward` / `cancel` / `forwarded-tcpip` / `direct-tcpip` (host owns sockets).
 - sftp, agent forwarding.
 - Calix identity XML (host/edgehost).
 - NETCONF XML framing (libnetconf).

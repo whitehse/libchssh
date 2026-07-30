@@ -72,6 +72,14 @@ typedef struct {
     uint32_t pty_width_px;
     uint32_t pty_height_px;
     int pending_pty;        /* we sent pty-req; wait SUCCESS */
+    /* Port-forward channel metadata */
+    int is_tcpip;           /* direct-tcpip or forwarded-tcpip */
+    int open_deferred;      /* wait chssh_channel_open_decide */
+    char tcpip_dest[CHSSH_ADDR_MAX + 1];
+    uint32_t tcpip_dest_port;
+    char tcpip_orig[CHSSH_ADDR_MAX + 1];
+    uint32_t tcpip_orig_port;
+    char open_type[32]; /* "session" | "direct-tcpip" | "forwarded-tcpip" */
 } chssh_channel_t;
 
 struct chssh_ctx {
@@ -101,6 +109,17 @@ struct chssh_ctx {
     int auto_open_netconf;
     int auto_accept_shell;
     int auto_accept_pty;
+
+    /* Pending peer GLOBAL_REQUEST tcpip-forward / cancel */
+    int global_req_pending; /* 0 none, 1 forward, 2 cancel */
+    int global_req_want_reply;
+    char global_req_addr[CHSSH_ADDR_MAX + 1];
+    uint32_t global_req_port;
+
+    /* We sent tcpip-forward; await REQUEST_SUCCESS/FAILURE */
+    int pending_tcpip_forward;
+    char pending_forward_addr[CHSSH_ADDR_MAX + 1];
+    uint32_t pending_forward_port;
 
     chssh_channel_t channels[CHSSH_MAX_CHANNELS];
     uint32_t next_local_id;

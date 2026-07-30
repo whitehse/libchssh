@@ -26,7 +26,7 @@
 - [x] `pty-req` / `window-change` / `env` + want_reply discipline (OpenSSH interactive)
 - [ ] Wire interop green on CI with `sshpass` + assert READY/hello
 - [ ] OpenSSH interactive staff shell e2e (`sshpass` + staff face)
-- [ ] `tcpip-forward` / `forwarded-tcpip` / `direct-tcpip` (reverse tunnels)
+- [x] `tcpip-forward` / `forwarded-tcpip` / `direct-tcpip` (reverse tunnels)
 - [ ] curve25519-sha256 KEX (optional modern path)
 - [ ] ed25519 host keys (keep RSA preferred for field OLTs)
 - [ ] Host key pin / known_hosts for client role

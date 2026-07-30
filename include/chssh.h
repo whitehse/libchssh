@@ -152,6 +152,14 @@ typedef enum {
     CHSSH_EVENT_WINDOW_CHANGE,   /* peer window-change (u.pty dims) */
     CHSSH_EVENT_READY,           /* netconf channel ready (E7 compat) */
 
+    /* Port forward (RFC 4254 §7) — library is socket-free; host binds/dials */
+    CHSSH_EVENT_TCPIP_FORWARD,         /* peer tcpip-forward (u.forward) */
+    CHSSH_EVENT_TCPIP_FORWARD_CANCEL,  /* peer cancel-tcpip-forward */
+    CHSSH_EVENT_TCPIP_FORWARD_OK,      /* our request accepted (u.forward) */
+    CHSSH_EVENT_TCPIP_FORWARD_FAIL,    /* our request rejected */
+    CHSSH_EVENT_DIRECT_TCPIP,          /* peer direct-tcpip open (u.tcpip) */
+    CHSSH_EVENT_FORWARDED_TCPIP, /* peer/us forwarded-tcpip open (u.tcpip) */
+
     CHSSH_EVENT_CHANNEL_DATA,    /* plaintext bytes (u.data) */
     CHSSH_EVENT_CHANNEL_EOF,     /* peer EOF on channel (u.channel) */
     CHSSH_EVENT_CHANNEL_CLOSE,   /* channel closed (u.channel) */
@@ -166,6 +174,7 @@ typedef enum {
 #define CHSSH_DATA_MAX  (64 * 1024)
 #define CHSSH_SUBSYS_NAME_MAX 63
 #define CHSSH_TERM_MAX  32
+#define CHSSH_ADDR_MAX  255
 
 typedef struct {
     chssh_event_type_t type;
@@ -194,6 +203,19 @@ typedef struct {
             uint32_t width_px;
             uint32_t height_px;
         } pty;
+        struct {
+            char     addr[CHSSH_ADDR_MAX + 1]; /* bind address */
+            uint32_t port;                    /* 0 = allocate */
+            int      want_reply;
+        } forward;
+        struct {
+            uint32_t channel_id; /* local channel id */
+            char     dest_host[CHSSH_ADDR_MAX + 1];
+            uint32_t dest_port;
+            char     originator[CHSSH_ADDR_MAX + 1];
+            uint32_t originator_port;
+            char     chan_type[32]; /* "direct-tcpip" | "forwarded-tcpip" */
+        } tcpip;
         struct {
             uint32_t channel_id; /* local channel id */
             uint8_t  data[CHSSH_DATA_MAX];
@@ -298,6 +320,55 @@ int chssh_channel_request_pty(chssh_ctx_t *ctx, uint32_t local_id,
  */
 int chssh_channel_request_decide(chssh_ctx_t *ctx, uint32_t local_id,
                                  int accept);
+
+/* --- Port forward (RFC 4254 §7; host owns sockets) --- */
+
+/**
+ * Client (or either role): request peer to listen for reverse connections
+ * (GLOBAL_REQUEST "tcpip-forward"). Peer emits CHSSH_EVENT_TCPIP_FORWARD;
+ * on success we get CHSSH_EVENT_TCPIP_FORWARD_OK (port may be allocated).
+ * @p port 0 asks peer to choose. @return 0 ok, -1 error.
+ */
+int chssh_request_tcpip_forward(chssh_ctx_t *ctx, const char *addr,
+                                uint32_t port);
+
+/**
+ * Cancel a previous reverse listen (GLOBAL_REQUEST "cancel-tcpip-forward").
+ */
+int chssh_request_cancel_tcpip_forward(chssh_ctx_t *ctx, const char *addr,
+                                       uint32_t port);
+
+/**
+ * After CHSSH_EVENT_TCPIP_FORWARD: accept (bind done) or reject.
+ * On accept with requested port 0, pass the actually bound port in
+ * @p bound_port (sent in REQUEST_SUCCESS payload per RFC 4254).
+ */
+int chssh_global_request_decide(chssh_ctx_t *ctx, int accept,
+                                uint32_t bound_port);
+
+/**
+ * After host accept on reverse listener: open "forwarded-tcpip" toward peer
+ * (typically CPE client). On confirm channel is READY for data.
+ */
+int chssh_channel_open_forwarded_tcpip(chssh_ctx_t *ctx, const char *conn_addr,
+                                       uint32_t conn_port, const char *orig_addr,
+                                       uint32_t orig_port,
+                                       uint32_t *local_id_out);
+
+/**
+ * Open "direct-tcpip" (local forward) toward peer. Peer emits
+ * CHSSH_EVENT_DIRECT_TCPIP and must chssh_channel_open_decide.
+ */
+int chssh_channel_open_direct_tcpip(chssh_ctx_t *ctx, const char *dest_host,
+                                    uint32_t dest_port, const char *orig_addr,
+                                    uint32_t orig_port,
+                                    uint32_t *local_id_out);
+
+/**
+ * Accept/reject pending direct-tcpip (or other deferred open) after event.
+ * Accept sends OPEN_CONFIRM and marks channel READY.
+ */
+int chssh_channel_open_decide(chssh_ctx_t *ctx, uint32_t local_id, int accept);
 
 /**
  * Queue plaintext for a specific channel (encrypted on wire in production).

@@ -796,6 +796,7 @@ static int send_channel_open_session_slot(chssh_ctx_t *ctx, chssh_channel_t *ch)
     ch->local_window = win;
     ch->local_max_packet = 32768;
     ch->state = CHSSH_CH_OPENING;
+    snprintf(ch->open_type, sizeof(ch->open_type), "session");
 
     pl[off++] = CHSSH_MSG_CHANNEL_OPEN;
     put_u32(pl + off, (uint32_t)n);
@@ -992,16 +993,100 @@ static int mark_channel_ready(chssh_ctx_t *ctx, chssh_channel_t *ch,
     return 0;
 }
 
-/** Accept a peer CHANNEL_OPEN session (either role). */
+static int send_channel_open_failure(chssh_ctx_t *ctx, uint32_t peer_ch,
+                                     const char *reason)
+{
+    uint8_t fail[96];
+    size_t fo = 0;
+    size_t rn;
+    if (!reason) {
+        reason = "administratively prohibited";
+    }
+    rn = strlen(reason);
+    if (rn > 48) {
+        rn = 48;
+    }
+    fail[fo++] = CHSSH_MSG_CHANNEL_OPEN_FAILURE;
+    put_u32(fail + fo, peer_ch);
+    fo += 4;
+    put_u32(fail + fo, 1); /* SSH_OPEN_ADMINISTRATIVELY_PROHIBITED */
+    fo += 4;
+    put_u32(fail + fo, (uint32_t)rn);
+    fo += 4;
+    memcpy(fail + fo, reason, rn);
+    fo += rn;
+    put_u32(fail + fo, 0);
+    fo += 4;
+    return chssh_i_send_packet(ctx, fail, fo);
+}
+
+static int send_channel_open_confirm(chssh_ctx_t *ctx, chssh_channel_t *ch)
+{
+    uint8_t conf[32];
+    size_t co = 0;
+    conf[co++] = CHSSH_MSG_CHANNEL_OPEN_CONFIRM;
+    put_u32(conf + co, ch->peer_id);
+    co += 4;
+    put_u32(conf + co, ch->local_id);
+    co += 4;
+    put_u32(conf + co, ch->local_window);
+    co += 4;
+    put_u32(conf + co, ch->local_max_packet);
+    co += 4;
+    return chssh_i_send_packet(ctx, conf, co);
+}
+
+/** Parse string at p[o], advance o. Returns 0 ok. */
+static int parse_ssh_string(const uint8_t *p, size_t len, size_t *o, char *out,
+                            size_t out_sz)
+{
+    uint32_t n;
+    if (!o || *o + 4 > len) {
+        return -1;
+    }
+    n = get_u32(p + *o);
+    *o += 4;
+    if (*o + n > len || n >= out_sz) {
+        return -1;
+    }
+    if (out && out_sz) {
+        memcpy(out, p + *o, n);
+        out[n] = '\0';
+    }
+    *o += n;
+    return 0;
+}
+
+static void fill_tcpip_event(chssh_event_t *ev, chssh_event_type_t type,
+                             const chssh_channel_t *ch)
+{
+    memset(ev, 0, sizeof(*ev));
+    ev->type = type;
+    ev->u.tcpip.channel_id = ch->local_id;
+    snprintf(ev->u.tcpip.dest_host, sizeof(ev->u.tcpip.dest_host), "%s",
+             ch->tcpip_dest);
+    ev->u.tcpip.dest_port = ch->tcpip_dest_port;
+    snprintf(ev->u.tcpip.originator, sizeof(ev->u.tcpip.originator), "%s",
+             ch->tcpip_orig);
+    ev->u.tcpip.originator_port = ch->tcpip_orig_port;
+    snprintf(ev->u.tcpip.chan_type, sizeof(ev->u.tcpip.chan_type), "%s",
+             ch->open_type);
+}
+
+/**
+ * Accept peer CHANNEL_OPEN: session | direct-tcpip | forwarded-tcpip.
+ * direct-tcpip is deferred (host dials) until chssh_channel_open_decide.
+ * forwarded-tcpip is auto-confirmed (host already accepted reverse conn).
+ */
 static int accept_session_open(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
 {
     size_t o = 1;
     uint32_t n, peer_ch, peer_win, peer_max;
-    uint8_t conf[32];
-    size_t co = 0;
     chssh_channel_t *ch;
     char ctype[32];
     chssh_event_t ev;
+    int is_direct = 0;
+    int is_forwarded = 0;
 
     n = get_u32(p + o);
     o += 4;
@@ -1019,31 +1104,22 @@ static int accept_session_open(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
     peer_win = get_u32(p + o);
     o += 4;
     peer_max = get_u32(p + o);
-    if (strcmp(ctype, "session") != 0) {
-        /* msg + peer_ch + reason_code + desc_len + desc + lang_len */
-        uint8_t fail[64];
-        size_t fo = 0;
-        const char *reason = "unknown channel type";
-        size_t rn = strlen(reason);
-        if (1u + 4u + 4u + 4u + rn + 4u > sizeof(fail)) {
-            return 0;
-        }
-        fail[fo++] = CHSSH_MSG_CHANNEL_OPEN_FAILURE;
-        put_u32(fail + fo, peer_ch);
-        fo += 4;
-        put_u32(fail + fo, 3);
-        fo += 4;
-        put_u32(fail + fo, (uint32_t)rn);
-        fo += 4;
-        memcpy(fail + fo, reason, rn);
-        fo += rn;
-        put_u32(fail + fo, 0);
-        fo += 4;
-        (void)chssh_i_send_packet(ctx, fail, fo);
+    o += 4;
+
+    if (strcmp(ctype, "session") == 0) {
+        /* no extra data */
+    } else if (strcmp(ctype, "direct-tcpip") == 0) {
+        is_direct = 1;
+    } else if (strcmp(ctype, "forwarded-tcpip") == 0) {
+        is_forwarded = 1;
+    } else {
+        (void)send_channel_open_failure(ctx, peer_ch, "unknown channel type");
         return 0;
     }
+
     ch = channel_alloc(ctx);
     if (!ch) {
+        (void)send_channel_open_failure(ctx, peer_ch, "no free channels");
         return 0;
     }
     ch->local_id = ctx->next_local_id++;
@@ -1052,20 +1128,62 @@ static int accept_session_open(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
     ch->remote_max_packet = peer_max ? peer_max : 32768;
     ch->local_window = default_channel_window(ctx);
     ch->local_max_packet = 32768;
+    snprintf(ch->open_type, sizeof(ch->open_type), "%s", ctype);
+
+    if (is_direct || is_forwarded) {
+        char host[CHSSH_ADDR_MAX + 1];
+        char orig[CHSSH_ADDR_MAX + 1];
+        uint32_t dport = 0, oport = 0;
+        host[0] = orig[0] = '\0';
+        if (parse_ssh_string(p, len, &o, host, sizeof(host)) != 0 ||
+            o + 4 > len) {
+            memset(ch, 0, sizeof(*ch));
+            ch->state = CHSSH_CH_FREE;
+            (void)send_channel_open_failure(ctx, peer_ch, "bad tcpip open");
+            return 0;
+        }
+        dport = get_u32(p + o);
+        o += 4;
+        if (parse_ssh_string(p, len, &o, orig, sizeof(orig)) != 0 ||
+            o + 4 > len) {
+            memset(ch, 0, sizeof(*ch));
+            ch->state = CHSSH_CH_FREE;
+            (void)send_channel_open_failure(ctx, peer_ch, "bad tcpip open");
+            return 0;
+        }
+        oport = get_u32(p + o);
+        ch->is_tcpip = 1;
+        snprintf(ch->tcpip_dest, sizeof(ch->tcpip_dest), "%s", host);
+        ch->tcpip_dest_port = dport;
+        snprintf(ch->tcpip_orig, sizeof(ch->tcpip_orig), "%s", orig);
+        ch->tcpip_orig_port = oport;
+    }
+
+    if (is_direct) {
+        /* Defer confirm until host dials and decides. */
+        ch->state = CHSSH_CH_OPEN;
+        ch->open_deferred = 1;
+        ctx->state = CHSSH_STATE_CHANNEL;
+        fill_tcpip_event(&ev, CHSSH_EVENT_DIRECT_TCPIP, ch);
+        (void)chssh_i_push_event(ctx, &ev);
+        return 0;
+    }
+
     ch->state = CHSSH_CH_OPEN;
-    conf[co++] = CHSSH_MSG_CHANNEL_OPEN_CONFIRM;
-    put_u32(conf + co, peer_ch);
-    co += 4;
-    put_u32(conf + co, ch->local_id);
-    co += 4;
-    put_u32(conf + co, ch->local_window);
-    co += 4;
-    put_u32(conf + co, ch->local_max_packet);
-    co += 4;
-    if (chssh_i_send_packet(ctx, conf, co) != 0) {
+    if (send_channel_open_confirm(ctx, ch) != 0) {
         return -1;
     }
     ctx->state = CHSSH_STATE_CHANNEL;
+
+    if (is_forwarded) {
+        ch->state = CHSSH_CH_READY;
+        ctx->channel_ready = 1;
+        ctx->state = CHSSH_STATE_READY;
+        fill_tcpip_event(&ev, CHSSH_EVENT_FORWARDED_TCPIP, ch);
+        (void)chssh_i_push_event(ctx, &ev);
+        return 0;
+    }
+
     memset(&ev, 0, sizeof(ev));
     ev.type = CHSSH_EVENT_CHANNEL_OPEN;
     ev.u.channel.channel_id = ch->local_id;
@@ -1093,10 +1211,26 @@ static int on_channel_open_confirm(chssh_ctx_t *ctx, const uint8_t *p,
     ch->remote_window = get_u32(p + 9);
     ch->remote_max_packet = get_u32(p + 13);
     ch->state = CHSSH_CH_OPEN;
+
+    if (ch->is_tcpip) {
+        /* direct/forwarded: data-ready immediately after confirm */
+        ch->state = CHSSH_CH_READY;
+        ctx->channel_ready = 1;
+        ctx->state = CHSSH_STATE_READY;
+        fill_tcpip_event(&ev,
+                         strcmp(ch->open_type, "forwarded-tcpip") == 0
+                             ? CHSSH_EVENT_FORWARDED_TCPIP
+                             : CHSSH_EVENT_DIRECT_TCPIP,
+                         ch);
+        (void)chssh_i_push_event(ctx, &ev);
+        return 0;
+    }
+
     memset(&ev, 0, sizeof(ev));
     ev.type = CHSSH_EVENT_CHANNEL_OPEN;
     ev.u.channel.channel_id = ch->local_id;
-    snprintf(ev.u.channel.chan_type, sizeof(ev.u.channel.chan_type), "session");
+    snprintf(ev.u.channel.chan_type, sizeof(ev.u.channel.chan_type), "%s",
+             ch->open_type[0] ? ch->open_type : "session");
     (void)chssh_i_push_event(ctx, &ev);
     if (ch->pending_subsystem[0]) {
         return send_subsystem_request_ch(ctx, ch, ch->pending_subsystem);
@@ -1300,20 +1434,97 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
     }
     case CHSSH_MSG_IGNORE:
     case CHSSH_MSG_DEBUG:
+        return 0;
     case CHSSH_MSG_REQUEST_SUCCESS:
+        if (ctx->pending_tcpip_forward) {
+            ctx->pending_tcpip_forward = 0;
+            memset(&ev, 0, sizeof(ev));
+            ev.type = CHSSH_EVENT_TCPIP_FORWARD_OK;
+            snprintf(ev.u.forward.addr, sizeof(ev.u.forward.addr), "%s",
+                     ctx->pending_forward_addr);
+            if (len >= 5) {
+                /* RFC 4254: bound port when request port was 0 */
+                ev.u.forward.port = get_u32(p + 1);
+            } else {
+                ev.u.forward.port = ctx->pending_forward_port;
+            }
+            if (ev.u.forward.port == 0) {
+                ev.u.forward.port = ctx->pending_forward_port;
+            }
+            (void)chssh_i_push_event(ctx, &ev);
+        }
+        return 0;
     case CHSSH_MSG_REQUEST_FAILURE:
-        /* Keepalive / global-request replies — no app action. */
+        if (ctx->pending_tcpip_forward) {
+            ctx->pending_tcpip_forward = 0;
+            memset(&ev, 0, sizeof(ev));
+            ev.type = CHSSH_EVENT_TCPIP_FORWARD_FAIL;
+            snprintf(ev.u.forward.addr, sizeof(ev.u.forward.addr), "%s",
+                     ctx->pending_forward_addr);
+            ev.u.forward.port = ctx->pending_forward_port;
+            (void)chssh_i_push_event(ctx, &ev);
+        }
         return 0;
     case CHSSH_MSG_GLOBAL_REQUEST:
         /*
-         * Peer global request (e.g. hostkeys-00@openssh.com, keepalive).
-         * If want_reply is set, answer FAILURE (we do not implement payloads)
-         * so the peer does not hang waiting.
+         * tcpip-forward / cancel-tcpip-forward → host (socket-free library).
+         * Other names (keepalive, hostkeys-00@openssh.com): FAILURE if want_reply.
          */
         if (len >= 6) {
             uint32_t nlen = get_u32(p + 1);
-            size_t want_off = 5 + (size_t)nlen;
-            if (want_off < len && p[want_off] != 0) {
+            size_t o = 5;
+            char name[64];
+            uint8_t want;
+            if (o + nlen > len || nlen >= sizeof(name)) {
+                return 0;
+            }
+            memcpy(name, p + o, nlen);
+            name[nlen] = '\0';
+            o += nlen;
+            if (o >= len) {
+                return 0;
+            }
+            want = p[o++];
+            if (strcmp(name, "tcpip-forward") == 0 ||
+                strcmp(name, "cancel-tcpip-forward") == 0) {
+                char addr[CHSSH_ADDR_MAX + 1];
+                uint32_t port = 0;
+                addr[0] = '\0';
+                if (parse_ssh_string(p, len, &o, addr, sizeof(addr)) != 0 ||
+                    o + 4 > len) {
+                    if (want) {
+                        uint8_t rep[1] = {CHSSH_MSG_REQUEST_FAILURE};
+                        (void)chssh_i_send_packet(ctx, rep, 1);
+                    }
+                    return 0;
+                }
+                port = get_u32(p + o);
+                if (ctx->global_req_pending) {
+                    /* one outstanding decision */
+                    if (want) {
+                        uint8_t rep[1] = {CHSSH_MSG_REQUEST_FAILURE};
+                        (void)chssh_i_send_packet(ctx, rep, 1);
+                    }
+                    return 0;
+                }
+                ctx->global_req_pending =
+                    (strcmp(name, "tcpip-forward") == 0) ? 1 : 2;
+                ctx->global_req_want_reply = want ? 1 : 0;
+                snprintf(ctx->global_req_addr, sizeof(ctx->global_req_addr),
+                         "%s", addr);
+                ctx->global_req_port = port;
+                memset(&ev, 0, sizeof(ev));
+                ev.type = (ctx->global_req_pending == 1)
+                              ? CHSSH_EVENT_TCPIP_FORWARD
+                              : CHSSH_EVENT_TCPIP_FORWARD_CANCEL;
+                snprintf(ev.u.forward.addr, sizeof(ev.u.forward.addr), "%s",
+                         addr);
+                ev.u.forward.port = port;
+                ev.u.forward.want_reply = want ? 1 : 0;
+                (void)chssh_i_push_event(ctx, &ev);
+                return 0;
+            }
+            if (want) {
                 uint8_t rep[1] = {CHSSH_MSG_REQUEST_FAILURE};
                 (void)chssh_i_send_packet(ctx, rep, 1);
             }
@@ -2334,6 +2545,232 @@ int chssh_channel_request_decide(chssh_ctx_t *ctx, uint32_t local_id,
     if (accept) {
         return mark_channel_ready(ctx, ch, "shell");
     }
+    return 0;
+}
+
+static int send_global_tcpip_request(chssh_ctx_t *ctx, const char *name,
+                                     const char *addr, uint32_t port)
+{
+    uint8_t pl[320];
+    size_t off = 0;
+    size_t nn, na;
+    if (!ctx || !name || !addr) {
+        return -1;
+    }
+    nn = strlen(name);
+    na = strlen(addr);
+    if (na > CHSSH_ADDR_MAX || nn > 40) {
+        return -1;
+    }
+    pl[off++] = CHSSH_MSG_GLOBAL_REQUEST;
+    put_u32(pl + off, (uint32_t)nn);
+    off += 4;
+    memcpy(pl + off, name, nn);
+    off += nn;
+    pl[off++] = 1; /* want_reply */
+    put_u32(pl + off, (uint32_t)na);
+    off += 4;
+    memcpy(pl + off, addr, na);
+    off += na;
+    put_u32(pl + off, port);
+    off += 4;
+    return chssh_i_send_packet(ctx, pl, off);
+}
+
+int chssh_request_tcpip_forward(chssh_ctx_t *ctx, const char *addr,
+                                uint32_t port)
+{
+    if (!ctx || ctx->error || !addr || !addr[0]) {
+        return -1;
+    }
+    if (!ctx->auth_ok) {
+        return -1;
+    }
+    if (ctx->pending_tcpip_forward) {
+        return -1;
+    }
+    ctx->pending_tcpip_forward = 1;
+    snprintf(ctx->pending_forward_addr, sizeof(ctx->pending_forward_addr), "%s",
+             addr);
+    ctx->pending_forward_port = port;
+    if (send_global_tcpip_request(ctx, "tcpip-forward", addr, port) != 0) {
+        ctx->pending_tcpip_forward = 0;
+        return -1;
+    }
+    return 0;
+}
+
+int chssh_request_cancel_tcpip_forward(chssh_ctx_t *ctx, const char *addr,
+                                       uint32_t port)
+{
+    if (!ctx || ctx->error || !addr || !addr[0]) {
+        return -1;
+    }
+    if (!ctx->auth_ok) {
+        return -1;
+    }
+    return send_global_tcpip_request(ctx, "cancel-tcpip-forward", addr, port);
+}
+
+int chssh_global_request_decide(chssh_ctx_t *ctx, int accept,
+                                uint32_t bound_port)
+{
+    if (!ctx || ctx->error || !ctx->global_req_pending) {
+        return -1;
+    }
+    if (ctx->global_req_want_reply) {
+        if (accept && ctx->global_req_pending == 1) {
+            /* REQUEST_SUCCESS; include port when peer asked for 0 */
+            uint8_t pl[8];
+            size_t off = 0;
+            pl[off++] = CHSSH_MSG_REQUEST_SUCCESS;
+            if (ctx->global_req_port == 0 || bound_port != 0) {
+                uint32_t p = bound_port ? bound_port : ctx->global_req_port;
+                put_u32(pl + off, p);
+                off += 4;
+            }
+            if (chssh_i_send_packet(ctx, pl, off) != 0) {
+                return -1;
+            }
+        } else if (accept && ctx->global_req_pending == 2) {
+            uint8_t pl[1] = {CHSSH_MSG_REQUEST_SUCCESS};
+            if (chssh_i_send_packet(ctx, pl, 1) != 0) {
+                return -1;
+            }
+        } else {
+            uint8_t pl[1] = {CHSSH_MSG_REQUEST_FAILURE};
+            if (chssh_i_send_packet(ctx, pl, 1) != 0) {
+                return -1;
+            }
+        }
+    }
+    ctx->global_req_pending = 0;
+    ctx->global_req_want_reply = 0;
+    (void)bound_port;
+    return 0;
+}
+
+static int send_channel_open_tcpip(chssh_ctx_t *ctx, chssh_channel_t *ch,
+                                   const char *ctype, const char *host,
+                                   uint32_t port, const char *orig,
+                                   uint32_t oport)
+{
+    uint8_t pl[640];
+    size_t off = 0;
+    size_t nt, nh, no;
+    uint32_t win;
+    if (!ch || !ctype || !host || !orig) {
+        return -1;
+    }
+    nt = strlen(ctype);
+    nh = strlen(host);
+    no = strlen(orig);
+    if (nh > CHSSH_ADDR_MAX || no > CHSSH_ADDR_MAX) {
+        return -1;
+    }
+    win = default_channel_window(ctx);
+    ch->local_window = win;
+    ch->local_max_packet = 32768;
+    ch->state = CHSSH_CH_OPENING;
+    ch->is_tcpip = 1;
+    snprintf(ch->open_type, sizeof(ch->open_type), "%s", ctype);
+    snprintf(ch->tcpip_dest, sizeof(ch->tcpip_dest), "%s", host);
+    ch->tcpip_dest_port = port;
+    snprintf(ch->tcpip_orig, sizeof(ch->tcpip_orig), "%s", orig);
+    ch->tcpip_orig_port = oport;
+    pl[off++] = CHSSH_MSG_CHANNEL_OPEN;
+    put_u32(pl + off, (uint32_t)nt);
+    off += 4;
+    memcpy(pl + off, ctype, nt);
+    off += nt;
+    put_u32(pl + off, ch->local_id);
+    off += 4;
+    put_u32(pl + off, win);
+    off += 4;
+    put_u32(pl + off, ch->local_max_packet);
+    off += 4;
+    put_u32(pl + off, (uint32_t)nh);
+    off += 4;
+    memcpy(pl + off, host, nh);
+    off += nh;
+    put_u32(pl + off, port);
+    off += 4;
+    put_u32(pl + off, (uint32_t)no);
+    off += 4;
+    memcpy(pl + off, orig, no);
+    off += no;
+    put_u32(pl + off, oport);
+    off += 4;
+    return chssh_i_send_packet(ctx, pl, off);
+}
+
+int chssh_channel_open_forwarded_tcpip(chssh_ctx_t *ctx, const char *conn_addr,
+                                       uint32_t conn_port, const char *orig_addr,
+                                       uint32_t orig_port,
+                                       uint32_t *local_id_out)
+{
+    chssh_channel_t *ch;
+    if (!ctx || ctx->error || !conn_addr || !orig_addr || !local_id_out) {
+        return -1;
+    }
+    if (!ctx->auth_ok) {
+        return -1;
+    }
+    ch = channel_alloc(ctx);
+    if (!ch) {
+        return -1;
+    }
+    ch->local_id = ctx->next_local_id++;
+    *local_id_out = ch->local_id;
+    return send_channel_open_tcpip(ctx, ch, "forwarded-tcpip", conn_addr,
+                                   conn_port, orig_addr, orig_port);
+}
+
+int chssh_channel_open_direct_tcpip(chssh_ctx_t *ctx, const char *dest_host,
+                                    uint32_t dest_port, const char *orig_addr,
+                                    uint32_t orig_port,
+                                    uint32_t *local_id_out)
+{
+    chssh_channel_t *ch;
+    if (!ctx || ctx->error || !dest_host || !orig_addr || !local_id_out) {
+        return -1;
+    }
+    if (!ctx->auth_ok) {
+        return -1;
+    }
+    ch = channel_alloc(ctx);
+    if (!ch) {
+        return -1;
+    }
+    ch->local_id = ctx->next_local_id++;
+    *local_id_out = ch->local_id;
+    return send_channel_open_tcpip(ctx, ch, "direct-tcpip", dest_host, dest_port,
+                                   orig_addr, orig_port);
+}
+
+int chssh_channel_open_decide(chssh_ctx_t *ctx, uint32_t local_id, int accept)
+{
+    chssh_channel_t *ch;
+    if (!ctx || ctx->error) {
+        return -1;
+    }
+    ch = channel_by_local(ctx, local_id);
+    if (!ch || !ch->open_deferred) {
+        return -1;
+    }
+    ch->open_deferred = 0;
+    if (!accept) {
+        (void)send_channel_open_failure(ctx, ch->peer_id, "connect failed");
+        memset(ch, 0, sizeof(*ch));
+        ch->state = CHSSH_CH_FREE;
+        return 0;
+    }
+    if (send_channel_open_confirm(ctx, ch) != 0) {
+        return -1;
+    }
+    ch->state = CHSSH_CH_READY;
+    ctx->channel_ready = 1;
+    ctx->state = CHSSH_STATE_READY;
     return 0;
 }
 
