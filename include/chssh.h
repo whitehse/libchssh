@@ -25,8 +25,14 @@ extern "C" {
 #endif
 
 #define CHSSH_VERSION_MAJOR 0
-#define CHSSH_VERSION_MINOR 2
+#define CHSSH_VERSION_MINOR 3
 #define CHSSH_VERSION_PATCH 0
+
+/**
+ * Crypto backend for lab_mode=0 production path.
+ * "openssl" | "mbedtls" | "none" (lab-only build).
+ */
+const char *chssh_crypto_backend(void);
 
 /** Default identification (OpenSSH-like; some field gear rejects exotic idents). */
 #define CHSSH_DEFAULT_IDENT "SSH-2.0-OpenSSH_8.9"

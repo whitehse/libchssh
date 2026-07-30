@@ -29,6 +29,7 @@ trap cleanup EXIT
 sleep 0.4
 
 set +e
+# subsystem after host (OpenSSH parses -s as remote command otherwise)
 OUT=$(sshpass -p sysadmin ssh \
   -o StrictHostKeyChecking=no \
   -o UserKnownHostsFile=/dev/null \
@@ -36,9 +37,13 @@ OUT=$(sshpass -p sysadmin ssh \
   -o PubkeyAuthentication=no \
   -o NumberOfPasswordPrompts=1 \
   -o ConnectTimeout=5 \
+  -o KexAlgorithms=diffie-hellman-group14-sha256,ecdh-sha2-nistp256 \
+  -o HostKeyAlgorithms=rsa-sha2-256,ssh-rsa \
+  -o Ciphers=aes128-ctr \
+  -o MACs=hmac-sha2-256 \
   -p "$PORT" \
-  -s netconf \
-  sysadmin@127.0.0.1 2>&1 <<'EOF'
+  sysadmin@127.0.0.1 \
+  -s netconf 2>&1 <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
   <capabilities>

@@ -33,4 +33,4 @@
 - [x] edgehost `e7_callhome` integration (libchssh preferred path)
 - [ ] libnetconf optional backend via libchssh
 - [ ] Fuzz corpus for identification + encrypted packet parser
-- [ ] mbedTLS crypto backend for OpenWrt CPE agent
+- [x] mbedTLS crypto backend for OpenWrt CPE agent (`CHSSH_CRYPTO=mbedtls`)

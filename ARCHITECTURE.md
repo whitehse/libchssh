@@ -37,14 +37,17 @@ on READY: chssh_channel_send / CHANNEL_DATA ↔ libnetconf feed/get
 | Mode | Purpose |
 |------|---------|
 | `lab_mode=1` | Dialectic + unit tests; KEXINIT advertises `chssh-lab-v1` + `none` cipher; NEWKEYS then cleartext binary packets. **Not** interoperable with OpenSSH/E7. |
-| `lab_mode=0` | **Production** (OpenSSL): `diffie-hellman-group14-sha256`, RSA host key (`rsa-sha2-256` signatures), `aes128-ctr`, `hmac-sha2-256`. Ephemeral RSA-2048 or PEM via `host_key_path`. |
+| `lab_mode=0` | **Production**: `diffie-hellman-group14-sha256` (+ ECDH nistp256), RSA host key (`rsa-sha2-256`), `aes128-ctr`, `hmac-sha2-256`. Backend: **OpenSSL** (host) or **mbedTLS** (CPE/OpenWrt). All crypto is pure compute (non-blocking / no sockets). |
 
 ### Production modules
 
 | File | Role |
 |------|------|
-| `src/chssh_crypto.c` | OpenSSL: RSA, DH group14, SHA-256, AES-CTR, HMAC-SHA2-256, key derivation |
-| `src/chssh.c` | SM, packets (plain + encrypted), KEXDH, auth, channels |
+| `src/chssh_crypto.c` | Backend select: OpenSSL / mbedTLS / none |
+| `src/chssh_crypto_mbedtls.inc` | mbedTLS RSA, DH group14, ECDH P-256, AES-CTR, HMAC |
+| `src/chssh.c` | SM, packets (plain + encrypted), KEX, auth, channels |
+
+`chssh_crypto_backend()` returns `"openssl"` | `"mbedtls"` | `"none"`.
 
 ## State machine
 
@@ -81,7 +84,7 @@ Channel requests for OpenSSH interactive clients:
 | Request | Behavior |
 |---------|----------|
 | `pty-req` | Auto-accept + SUCCESS (want_reply); emit `CHSSH_EVENT_PTY` with term/cols/rows |
-| `shell` | Auto-accept if `auto_accept_shell`, else event + `chssh_channel_request_decide` |
+| `shell` / `exec` | Auto-accept if `auto_accept_shell` (OpenSSH remote cmd uses exec) |
 | `window-change` | Update dims; emit `CHSSH_EVENT_WINDOW_CHANGE`; SUCCESS if want_reply |
 | `env` | SUCCESS if want_reply (values not stored) |
 | other | FAILURE if want_reply (never silent-drop) |

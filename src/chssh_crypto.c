@@ -120,6 +120,11 @@ int chssh_crypto_init(void)
     return 1;
 }
 
+const char *chssh_crypto_backend(void)
+{
+    return "openssl";
+}
+
 int chssh_crypto_random(uint8_t *buf, size_t len)
 {
     if (!buf || len == 0) {
@@ -811,7 +816,11 @@ done:
     return rc;
 }
 
-#else /* !HAVE_OPENSSL — lab_mode dialectic only; production KEX unavailable */
+#elif defined(HAVE_MBEDTLS) && HAVE_MBEDTLS
+/* mbedTLS production path — preferred on OpenWrt CPE (no OpenSSL). */
+#include "chssh_crypto_mbedtls.inc"
+
+#else /* !HAVE_OPENSSL && !HAVE_MBEDTLS — lab_mode dialectic only */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -828,13 +837,18 @@ int chssh_crypto_init(void)
     return 0;
 }
 
+const char *chssh_crypto_backend(void)
+{
+    return "none";
+}
+
 int chssh_crypto_random(uint8_t *buf, size_t len)
 {
     size_t i;
     if (!buf) {
         return -1;
     }
-    /* Weak deterministic fill — production path requires OpenSSL. */
+    /* Weak deterministic fill — production path requires OpenSSL/mbedTLS. */
     for (i = 0; i < len; i++) {
         buf[i] = (uint8_t)(0x5A ^ (unsigned)i);
     }
@@ -1030,4 +1044,4 @@ int chssh_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data,
     return -1;
 }
 
-#endif /* HAVE_OPENSSL */
+#endif /* HAVE_OPENSSL / HAVE_MBEDTLS / none */

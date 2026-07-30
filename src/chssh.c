@@ -1760,8 +1760,11 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
                         (void)send_channel_req_reply(ctx, ch, 0);
                     }
                 }
-            } else if (strcmp(req, "shell") == 0) {
-                /* Peer (typically server) wants interactive shell. */
+            } else if (strcmp(req, "shell") == 0 || strcmp(req, "exec") == 0) {
+                /*
+                 * Interactive shell or OpenSSH remote command (exec).
+                 * Stock `ssh host cmd` uses exec with want_reply; treat as shell.
+                 */
                 ch->shell_req_pending = 1;
                 ch->shell_want_reply = want ? 1 : 0;
                 if (ctx->auto_accept_shell) {
@@ -1774,7 +1777,7 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
                 ev.type = CHSSH_EVENT_SHELL;
                 ev.u.channel.channel_id = ch->local_id;
                 snprintf(ev.u.channel.chan_type, sizeof(ev.u.channel.chan_type),
-                         "shell");
+                         "%s", req);
                 (void)chssh_i_push_event(ctx, &ev);
             } else if (strcmp(req, "pty-req") == 0) {
                 /*

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(libchssh LANGUAGES C VERSION 0.2.0)
+project(libchssh LANGUAGES C VERSION 0.3.0)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -26,17 +26,67 @@ if(NOT MSVC)
         COMPILE_FLAGS "-Wno-deprecated-declarations")
 endif()
 
-# Optional OpenSSL for production KEX (v0.2+)
-find_package(OpenSSL)
-if(OpenSSL_FOUND)
-    target_compile_definitions(chssh PUBLIC HAVE_OPENSSL=1)
-    target_link_libraries(chssh PUBLIC OpenSSL::SSL OpenSSL::Crypto)
-    message(STATUS "OpenSSL found (production KEX enabled)")
-else()
-    # Explicit 0 so chssh_crypto.c compiles stubs (lab dialectic only).
-    target_compile_definitions(chssh PUBLIC HAVE_OPENSSL=0)
-    message(STATUS "OpenSSL not found; lab_mode dialectic only")
+# Production crypto: OpenSSL (host) or mbedTLS (CPE / OpenWrt).
+# CHSSH_CRYPTO=auto|openssl|mbedtls  (default auto: OpenSSL preferred)
+set(CHSSH_CRYPTO "auto" CACHE STRING "Production crypto: auto|openssl|mbedtls")
+set(MBEDTLS_ROOT "" CACHE PATH "Root containing usr/include + usr/lib (extracted debs)")
+
+if(MBEDTLS_ROOT)
+    list(APPEND CMAKE_PREFIX_PATH "${MBEDTLS_ROOT}")
 endif()
+
+set(_chssh_crypto_backend "none")
+find_package(OpenSSL)
+
+if(CHSSH_CRYPTO STREQUAL "openssl" OR
+   (CHSSH_CRYPTO STREQUAL "auto" AND OpenSSL_FOUND))
+    if(OpenSSL_FOUND)
+        target_compile_definitions(chssh PUBLIC HAVE_OPENSSL=1 HAVE_MBEDTLS=0)
+        target_link_libraries(chssh PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+        set(_chssh_crypto_backend "openssl")
+        message(STATUS "OpenSSL found (production KEX enabled)")
+    endif()
+endif()
+
+if(_chssh_crypto_backend STREQUAL "none" AND
+   (CHSSH_CRYPTO STREQUAL "mbedtls" OR CHSSH_CRYPTO STREQUAL "auto"))
+    set(_mbed_hints "")
+    if(MBEDTLS_ROOT)
+        list(APPEND _mbed_hints
+            "${MBEDTLS_ROOT}/usr/include"
+            "${MBEDTLS_ROOT}/include")
+    endif()
+    find_path(MBEDTLS_INCLUDE_DIR mbedtls/aes.h HINTS ${_mbed_hints} /usr/include)
+    set(_mbed_lib_hints "")
+    if(MBEDTLS_ROOT)
+        list(APPEND _mbed_lib_hints
+            "${MBEDTLS_ROOT}/usr/lib/x86_64-linux-gnu"
+            "${MBEDTLS_ROOT}/usr/lib"
+            "${MBEDTLS_ROOT}/lib")
+    endif()
+    find_library(MBEDTLS_CRYPTO_LIB NAMES mbedcrypto HINTS ${_mbed_lib_hints})
+    find_library(MBEDTLS_X509_LIB NAMES mbedx509 HINTS ${_mbed_lib_hints})
+    find_library(MBEDTLS_TLS_LIB NAMES mbedtls HINTS ${_mbed_lib_hints})
+    if(MBEDTLS_INCLUDE_DIR AND MBEDTLS_CRYPTO_LIB)
+        target_compile_definitions(chssh PUBLIC HAVE_MBEDTLS=1 HAVE_OPENSSL=0)
+        target_include_directories(chssh PRIVATE ${MBEDTLS_INCLUDE_DIR})
+        target_link_libraries(chssh PUBLIC ${MBEDTLS_CRYPTO_LIB})
+        if(MBEDTLS_X509_LIB)
+            target_link_libraries(chssh PUBLIC ${MBEDTLS_X509_LIB})
+        endif()
+        if(MBEDTLS_TLS_LIB)
+            target_link_libraries(chssh PUBLIC ${MBEDTLS_TLS_LIB})
+        endif()
+        set(_chssh_crypto_backend "mbedtls")
+        message(STATUS "mbedTLS found (production KEX) ${MBEDTLS_INCLUDE_DIR}")
+    endif()
+endif()
+
+if(_chssh_crypto_backend STREQUAL "none")
+    target_compile_definitions(chssh PUBLIC HAVE_OPENSSL=0 HAVE_MBEDTLS=0)
+    message(STATUS "No production crypto (OpenSSL/mbedTLS); lab_mode dialectic only")
+endif()
+message(STATUS "chssh crypto backend: ${_chssh_crypto_backend}")
 
 include(GNUInstallDirs)
 install(TARGETS chssh EXPORT chssh-targets
@@ -90,6 +140,15 @@ target_link_libraries(chssh_openssh_server PRIVATE chssh)
 add_test(NAME chssh_openssh_client
     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_chssh_openssh_client.sh)
 set_tests_properties(chssh_openssh_client PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    ENVIRONMENT "PATH=${CMAKE_CURRENT_BINARY_DIR}:$ENV{PATH}")
+
+# OpenSSH interactive staff shell (pty-req + shell; password auth)
+add_executable(chssh_openssh_staff_server tests/chssh_openssh_staff_server.c)
+target_link_libraries(chssh_openssh_staff_server PRIVATE chssh)
+add_test(NAME chssh_openssh_staff
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_chssh_openssh_staff.sh)
+set_tests_properties(chssh_openssh_staff PROPERTIES
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     ENVIRONMENT "PATH=${CMAKE_CURRENT_BINARY_DIR}:$ENV{PATH}")
 

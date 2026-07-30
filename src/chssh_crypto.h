@@ -1,6 +1,9 @@
 /**
  * @file chssh_crypto.h
- * @brief OpenSSL-backed crypto for production SSH (internal).
+ * @brief Production SSH crypto (OpenSSL or mbedTLS backend; internal).
+ *
+ * All crypto is synchronous/non-blocking (no network I/O). Library remains
+ * socket-free plumbing; host/agent pump feed/get_output on their threads.
  */
 #ifndef CHSSH_CRYPTO_H
 #define CHSSH_CRYPTO_H
@@ -28,6 +31,8 @@ typedef struct chssh_cipher  chssh_cipher_t;
 /* --- init / random --- */
 int  chssh_crypto_init(void);
 int  chssh_crypto_random(uint8_t *buf, size_t len);
+/** "openssl" | "mbedtls" | "none" */
+const char *chssh_crypto_backend(void);
 
 /* --- RSA host key (ssh-rsa / rsa-sha2-256) --- */
 chssh_rsa_key_t *chssh_rsa_generate(int bits); /* ephemeral, typically 2048 */
