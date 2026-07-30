@@ -40,7 +40,7 @@
 #define CHSSH_MSG_CHANNEL_SUCCESS       99
 #define CHSSH_MSG_CHANNEL_FAILURE       100
 
-#define CHSSH_MAX_ALLOWED_SUBSYS 8
+#define CHSSH_MAX_ALLOWED_SUBSYS 16
 
 typedef enum {
     CHSSH_CH_FREE = 0,
@@ -62,9 +62,12 @@ typedef struct {
     char pending_subsystem[CHSSH_SUBSYS_NAME_MAX + 1];
     char subsystem[CHSSH_SUBSYS_NAME_MAX + 1];
     int pending_shell;      /* we sent shell request; wait SUCCESS */
-    int shell_req_pending;  /* peer asked shell; wait request_decide */
-    int shell_want_reply;   /* peer want_reply for pending shell */
+    int pending_exec;       /* we sent exec request; wait SUCCESS */
+    int shell_req_pending;  /* peer asked shell/exec; wait request_decide */
+    int shell_want_reply;   /* peer want_reply for pending shell/exec */
     int is_shell;           /* shell channel (staff reverse) */
+    int is_exec;            /* exec channel (SCP / remote command) */
+    char exec_command[CHSSH_CMD_MAX + 1]; /* peer or our exec command */
     int has_pty;            /* peer (or we) established pty-req */
     char term[CHSSH_TERM_MAX + 1];
     uint32_t pty_cols;

@@ -822,6 +822,7 @@ static int send_shell_request_ch(chssh_ctx_t *ctx, chssh_channel_t *ch)
         return -1;
     }
     ch->pending_shell = 1;
+    ch->pending_exec = 0;
     pl[off++] = CHSSH_MSG_CHANNEL_REQUEST;
     put_u32(pl + off, ch->peer_id);
     off += 4;
@@ -830,6 +831,44 @@ static int send_shell_request_ch(chssh_ctx_t *ctx, chssh_channel_t *ch)
     memcpy(pl + off, req, nr);
     off += nr;
     pl[off++] = 1; /* want_reply */
+    return chssh_i_send_packet(ctx, pl, off);
+}
+
+/**
+ * CHANNEL_REQUEST "exec" + command string (RFC 4254 §6.5). Used for SCP and
+ * stock OpenSSH remote commands.
+ */
+static int send_exec_request_ch(chssh_ctx_t *ctx, chssh_channel_t *ch,
+                                const char *command)
+{
+    uint8_t pl[32 + CHSSH_CMD_MAX];
+    size_t off = 0;
+    const char *req = "exec";
+    size_t nr = strlen(req);
+    size_t nc;
+    if (!ch || ch->state != CHSSH_CH_OPEN || !command) {
+        return -1;
+    }
+    nc = strlen(command);
+    if (nc == 0 || nc > CHSSH_CMD_MAX) {
+        return -1;
+    }
+    snprintf(ch->exec_command, sizeof(ch->exec_command), "%s", command);
+    ch->pending_exec = 1;
+    ch->pending_shell = 0;
+    ch->is_exec = 1;
+    pl[off++] = CHSSH_MSG_CHANNEL_REQUEST;
+    put_u32(pl + off, ch->peer_id);
+    off += 4;
+    put_u32(pl + off, (uint32_t)nr);
+    off += 4;
+    memcpy(pl + off, req, nr);
+    off += nr;
+    pl[off++] = 1; /* want_reply */
+    put_u32(pl + off, (uint32_t)nc);
+    off += 4;
+    memcpy(pl + off, command, nc);
+    off += nc;
     return chssh_i_send_packet(ctx, pl, off);
 }
 
@@ -960,15 +999,29 @@ static int mark_channel_ready(chssh_ctx_t *ctx, chssh_channel_t *ch,
         snprintf(ch->subsystem, sizeof(ch->subsystem), "%s", sub);
         if (strcmp(sub, "shell") == 0) {
             ch->is_shell = 1;
+            ch->is_exec = 0;
+        } else if (strcmp(sub, "exec") == 0) {
+            ch->is_exec = 1;
+            ch->is_shell = 0;
         }
     }
     ch->pending_subsystem[0] = '\0';
     ch->pending_shell = 0;
+    ch->pending_exec = 0;
     ch->shell_req_pending = 0;
     ctx->channel_ready = 1;
     ctx->state = CHSSH_STATE_READY;
 
-    if (ch->is_shell) {
+    if (ch->is_exec) {
+        memset(&ev, 0, sizeof(ev));
+        ev.type = CHSSH_EVENT_EXEC;
+        ev.u.exec.channel_id = ch->local_id;
+        if (ch->exec_command[0]) {
+            snprintf(ev.u.exec.command, sizeof(ev.u.exec.command), "%s",
+                     ch->exec_command);
+        }
+        (void)chssh_i_push_event(ctx, &ev);
+    } else if (ch->is_shell) {
         memset(&ev, 0, sizeof(ev));
         ev.type = CHSSH_EVENT_SHELL;
         ev.u.channel.channel_id = ch->local_id;
@@ -1234,6 +1287,9 @@ static int on_channel_open_confirm(chssh_ctx_t *ctx, const uint8_t *p,
     (void)chssh_i_push_event(ctx, &ev);
     if (ch->pending_subsystem[0]) {
         return send_subsystem_request_ch(ctx, ch, ch->pending_subsystem);
+    }
+    if (ch->pending_exec && ch->exec_command[0]) {
+        return send_exec_request_ch(ctx, ch, ch->exec_command);
     }
     if (ch->pending_shell) {
         return send_shell_request_ch(ctx, ch);
@@ -1741,8 +1797,12 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
             req[rn] = '\0';
             o += rn;
             want = p[o++];
-            if (strcmp(req, "subsystem") == 0 &&
-                ctx->role == CHSSH_ROLE_SERVER && o + 4 <= len) {
+            if (strcmp(req, "subsystem") == 0 && o + 4 <= len) {
+                /*
+                 * SERVER: staff/client requests sftp|tun|tap|edge-*.
+                 * CLIENT: peer (edgehost) requests sftp|tun|tap toward CPE.
+                 * Both enforce allowed_subsystems allowlist.
+                 */
                 uint32_t sn = get_u32(p + o);
                 o += 4;
                 if (o + sn <= len && sn <= CHSSH_SUBSYS_NAME_MAX) {
@@ -1760,13 +1820,12 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
                         (void)send_channel_req_reply(ctx, ch, 0);
                     }
                 }
-            } else if (strcmp(req, "shell") == 0 || strcmp(req, "exec") == 0) {
-                /*
-                 * Interactive shell or OpenSSH remote command (exec).
-                 * Stock `ssh host cmd` uses exec with want_reply; treat as shell.
-                 */
+            } else if (strcmp(req, "shell") == 0) {
+                /* Interactive shell (staff reverse / OpenSSH login). */
                 ch->shell_req_pending = 1;
                 ch->shell_want_reply = want ? 1 : 0;
+                ch->is_exec = 0;
+                ch->exec_command[0] = '\0';
                 if (ctx->auto_accept_shell) {
                     if (want && send_channel_req_reply(ctx, ch, 1) != 0) {
                         return -1;
@@ -1777,7 +1836,39 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
                 ev.type = CHSSH_EVENT_SHELL;
                 ev.u.channel.channel_id = ch->local_id;
                 snprintf(ev.u.channel.chan_type, sizeof(ev.u.channel.chan_type),
-                         "%s", req);
+                         "shell");
+                (void)chssh_i_push_event(ctx, &ev);
+            } else if (strcmp(req, "exec") == 0) {
+                /*
+                 * OpenSSH remote command / SCP. Parse command string; do not
+                 * collapse to shell (SCP needs pipes, not a PTY).
+                 */
+                uint32_t cn = 0;
+                ch->shell_req_pending = 1;
+                ch->shell_want_reply = want ? 1 : 0;
+                ch->is_exec = 1;
+                ch->exec_command[0] = '\0';
+                if (o + 4 <= len) {
+                    cn = get_u32(p + o);
+                    o += 4;
+                    if (o + cn <= len && cn > 0 && cn <= CHSSH_CMD_MAX) {
+                        memcpy(ch->exec_command, p + o, cn);
+                        ch->exec_command[cn] = '\0';
+                    }
+                }
+                if (ctx->auto_accept_shell) {
+                    if (want && send_channel_req_reply(ctx, ch, 1) != 0) {
+                        return -1;
+                    }
+                    return mark_channel_ready(ctx, ch, "exec");
+                }
+                memset(&ev, 0, sizeof(ev));
+                ev.type = CHSSH_EVENT_EXEC;
+                ev.u.exec.channel_id = ch->local_id;
+                if (ch->exec_command[0]) {
+                    snprintf(ev.u.exec.command, sizeof(ev.u.exec.command), "%s",
+                             ch->exec_command);
+                }
                 (void)chssh_i_push_event(ctx, &ev);
             } else if (strcmp(req, "pty-req") == 0) {
                 /*
@@ -1887,6 +1978,9 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
             if (ch->pending_shell) {
                 return mark_channel_ready(ctx, ch, "shell");
             }
+            if (ch->pending_exec) {
+                return mark_channel_ready(ctx, ch, "exec");
+            }
             if (ch->pending_subsystem[0] || ctx->role == CHSSH_ROLE_CLIENT) {
                 const char *sub = ch->pending_subsystem[0]
                                       ? ch->pending_subsystem
@@ -1901,6 +1995,7 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
             chssh_channel_t *ch = channel_by_local(ctx, local_id);
             if (ch) {
                 ch->pending_shell = 0;
+                ch->pending_exec = 0;
                 ch->pending_subsystem[0] = '\0';
             }
             chssh_i_set_error(ctx, 21, "channel request failure");
@@ -2484,7 +2579,19 @@ int chssh_channel_request_subsystem(chssh_ctx_t *ctx, uint32_t local_id,
         return -1;
     }
     ch = channel_by_local(ctx, local_id);
-    if (!ch || ch->state != CHSSH_CH_OPEN) {
+    if (!ch) {
+        return -1;
+    }
+    if (ch->state == CHSSH_CH_OPENING) {
+        /* Defer subsystem request until OPEN confirm */
+        size_t ns = strlen(name);
+        if (ns > CHSSH_SUBSYS_NAME_MAX) {
+            return -1;
+        }
+        memcpy(ch->pending_subsystem, name, ns + 1);
+        return 0;
+    }
+    if (ch->state != CHSSH_CH_OPEN) {
         return -1;
     }
     return send_subsystem_request_ch(ctx, ch, name);
@@ -2503,12 +2610,42 @@ int chssh_channel_request_shell(chssh_ctx_t *ctx, uint32_t local_id)
     if (ch->state == CHSSH_CH_OPENING) {
         /* Request shell after confirm */
         ch->pending_shell = 1;
+        ch->pending_exec = 0;
         return 0;
     }
     if (ch->state != CHSSH_CH_OPEN) {
         return -1;
     }
     return send_shell_request_ch(ctx, ch);
+}
+
+int chssh_channel_request_exec(chssh_ctx_t *ctx, uint32_t local_id,
+                               const char *command)
+{
+    chssh_channel_t *ch;
+    size_t nc;
+    if (!ctx || !command || !command[0] || ctx->error) {
+        return -1;
+    }
+    nc = strlen(command);
+    if (nc > CHSSH_CMD_MAX) {
+        return -1;
+    }
+    ch = channel_by_local(ctx, local_id);
+    if (!ch) {
+        return -1;
+    }
+    snprintf(ch->exec_command, sizeof(ch->exec_command), "%s", command);
+    ch->is_exec = 1;
+    if (ch->state == CHSSH_CH_OPENING) {
+        ch->pending_exec = 1;
+        ch->pending_shell = 0;
+        return 0;
+    }
+    if (ch->state != CHSSH_CH_OPEN) {
+        return -1;
+    }
+    return send_exec_request_ch(ctx, ch, command);
 }
 
 int chssh_channel_request_pty(chssh_ctx_t *ctx, uint32_t local_id,
@@ -2589,6 +2726,9 @@ int chssh_channel_request_decide(chssh_ctx_t *ctx, uint32_t local_id,
         }
     }
     if (accept) {
+        if (ch->is_exec) {
+            return mark_channel_ready(ctx, ch, "exec");
+        }
         return mark_channel_ready(ctx, ch, "shell");
     }
     return 0;

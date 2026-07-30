@@ -104,11 +104,24 @@ int main(int argc, char **argv)
             }
             if (ev.type == CHSSH_EVENT_SHELL &&
                 (strcmp(ev.u.channel.chan_type, "shell-ready") == 0 ||
-                 strcmp(ev.u.channel.chan_type, "shell") == 0 ||
-                 strcmp(ev.u.channel.chan_type, "exec") == 0)) {
+                 strcmp(ev.u.channel.chan_type, "shell") == 0)) {
                 shell_ready = 1;
                 shell_ch = ev.u.channel.channel_id;
                 fprintf(stderr, "SHELL ready ch=%u\n", (unsigned)shell_ch);
+                {
+                    const char *msg = "STAFF_SHELL_OK\n";
+                    (void)chssh_channel_send_id(ssh, shell_ch,
+                                                (const uint8_t *)msg,
+                                                strlen(msg));
+                }
+            }
+            if (ev.type == CHSSH_EVENT_EXEC) {
+                /* OpenSSH remote command / SCP uses exec (not shell). */
+                shell_ready = 1;
+                shell_ch = ev.u.exec.channel_id;
+                fprintf(stderr, "EXEC ready ch=%u cmd=%s\n",
+                        (unsigned)shell_ch,
+                        ev.u.exec.command[0] ? ev.u.exec.command : "?");
                 {
                     const char *msg = "STAFF_SHELL_OK\n";
                     (void)chssh_channel_send_id(ssh, shell_ch,

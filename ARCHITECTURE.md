@@ -84,18 +84,22 @@ Channel requests for OpenSSH interactive clients:
 | Request | Behavior |
 |---------|----------|
 | `pty-req` | Auto-accept + SUCCESS (want_reply); emit `CHSSH_EVENT_PTY` with term/cols/rows |
-| `shell` / `exec` | Auto-accept if `auto_accept_shell` (OpenSSH remote cmd uses exec) |
+| `shell` | Auto-accept if `auto_accept_shell`; emit `CHSSH_EVENT_SHELL` |
+| `exec` | Parse command; auto-accept if `auto_accept_shell`; emit `CHSSH_EVENT_EXEC` (SCP path — not collapsed to shell) |
+| `subsystem` | Allowlist check (both roles); emit `CHSSH_EVENT_SUBSYSTEM` (`sftp`/`tun`/`tap`/edge-*) |
 | `window-change` | Update dims; emit `CHSSH_EVENT_WINDOW_CHANGE`; SUCCESS if want_reply |
 | `env` | SUCCESS if want_reply (values not stored) |
 | other | FAILURE if want_reply (never silent-drop) |
 
 PTY is plumbing only — host/agent owns real `posix_openpt` and `TIOCSWINSZ`.
+SFTP/TUN/TAP are named subsystems; host/agent runs `sftp-server` or TUN/TAP fds.
 
 ## Deliberate absences
 
 - curve25519 / ed25519 (RSA preferred for field OLTs first).
 - ~~Port forwarding~~ — `tcpip-forward` / `cancel` / `forwarded-tcpip` / `direct-tcpip` (host owns sockets).
-- sftp, agent forwarding.
+- ~~sftp subsystem~~ — allowlisted `sftp` + agent/host runs external `sftp-server`.
+- agent forwarding / X11.
 - Calix identity XML (host/edgehost).
 - NETCONF XML framing (libnetconf).
 - known_hosts pinning (client accepts any when `accept_any_hostkey`; pin API later).

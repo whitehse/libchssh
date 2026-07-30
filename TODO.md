@@ -27,6 +27,7 @@
 - [ ] Wire interop green on CI with `sshpass` + assert READY/hello
 - [ ] OpenSSH interactive staff shell e2e (`sshpass` + staff face)
 - [x] `tcpip-forward` / `forwarded-tcpip` / `direct-tcpip` (reverse tunnels)
+- [x] Staff reverse `sftp` / `exec` (SCP) / subsystems `tun` + `tap`
 - [ ] curve25519-sha256 KEX (optional modern path)
 - [ ] ed25519 host keys (keep RSA preferred for field OLTs)
 - [ ] Host key pin / known_hosts for client role

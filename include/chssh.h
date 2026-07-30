@@ -46,6 +46,11 @@ const char *chssh_crypto_backend(void);
 #define CHSSH_SUBSYSTEM_EDGE_AI        "edge-ai"
 #define CHSSH_SUBSYSTEM_EDGE_CONTROL   "edge-control"
 
+/** Staff reverse-access subsystems (over callhome SSH tunnel). */
+#define CHSSH_SUBSYSTEM_SFTP "sftp"
+#define CHSSH_SUBSYSTEM_TUN  "tun"  /* L3 IP tunnel (framed packets) */
+#define CHSSH_SUBSYSTEM_TAP  "tap"  /* L2 Ethernet tunnel (framed frames) */
+
 /** Max concurrent channels per connection (fixed table). */
 #define CHSSH_MAX_CHANNELS 16
 
@@ -95,9 +100,11 @@ typedef struct {
     const char *host_key_path; /* SERVER: PEM path; NULL = ephemeral when possible */
 
     /**
-     * Comma-separated subsystem allowlist for SERVER (and client policy hint).
+     * Comma-separated subsystem allowlist for SERVER (and client peer-accept).
      * NULL or empty → "netconf" only. Example CPE host:
-     * "edge-telemetry,edge-pg,edge-ai,edge-control"
+     * "edge-telemetry,edge-pg,edge-ai,edge-control,sftp,tun,tap"
+     * Staff face: "sftp,tun,tap". CLIENT also uses this list when the peer
+     * (server) requests a subsystem (staff reverse SFTP/TUN/TAP).
      */
     const char *allowed_subsystems;
 
@@ -154,6 +161,7 @@ typedef enum {
     CHSSH_EVENT_CHANNEL_OPEN,    /* session channel open (u.channel) */
     CHSSH_EVENT_SUBSYSTEM,       /* subsystem request/ready (u.subsystem) */
     CHSSH_EVENT_SHELL,           /* peer requested shell (u.channel); decide */
+    CHSSH_EVENT_EXEC,            /* peer/we requested exec (u.exec); SCP path */
     CHSSH_EVENT_PTY,             /* peer pty-req accepted (u.pty) */
     CHSSH_EVENT_WINDOW_CHANGE,   /* peer window-change (u.pty dims) */
     CHSSH_EVENT_READY,           /* netconf channel ready (E7 compat) */
@@ -181,6 +189,7 @@ typedef enum {
 #define CHSSH_SUBSYS_NAME_MAX 63
 #define CHSSH_TERM_MAX  32
 #define CHSSH_ADDR_MAX  255
+#define CHSSH_CMD_MAX   512   /* CHANNEL_REQUEST exec command string */
 
 typedef struct {
     chssh_event_type_t type;
@@ -201,6 +210,10 @@ typedef struct {
             uint32_t channel_id; /* local channel id */
             char     chan_type[32]; /* e.g. "session" */
         } channel;
+        struct {
+            uint32_t channel_id; /* local channel id */
+            char     command[CHSSH_CMD_MAX + 1];
+        } exec;
         struct {
             uint32_t channel_id;
             char     term[CHSSH_TERM_MAX + 1]; /* empty on window-change */
@@ -310,6 +323,15 @@ int chssh_channel_request_subsystem(chssh_ctx_t *ctx, uint32_t local_id,
  * @return 0 ok, -1 error.
  */
 int chssh_channel_request_shell(chssh_ctx_t *ctx, uint32_t local_id);
+
+/**
+ * Request CHANNEL_REQUEST "exec" with @p command (OpenSSH remote command / SCP).
+ * May be called while channel is still OPENING (deferred until OPEN confirm).
+ * On success peer emits CHSSH_EVENT_EXEC (or we receive SUCCESS → EXEC ready).
+ * @return 0 ok, -1 error.
+ */
+int chssh_channel_request_exec(chssh_ctx_t *ctx, uint32_t local_id,
+                               const char *command);
 
 /**
  * Request a pseudo-terminal on an open session channel (OpenSSH-compatible
