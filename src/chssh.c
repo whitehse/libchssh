@@ -2525,6 +2525,49 @@ int chssh_channel_request_pty(chssh_ctx_t *ctx, uint32_t local_id,
     return send_pty_request_ch(ctx, ch, term, cols, rows);
 }
 
+int chssh_channel_window_change(chssh_ctx_t *ctx, uint32_t local_id,
+                                uint32_t cols, uint32_t rows)
+{
+    chssh_channel_t *ch;
+    uint8_t pl[64];
+    size_t off = 0;
+    const char *req = "window-change";
+    size_t nr = strlen(req);
+
+    if (!ctx || ctx->error) {
+        return -1;
+    }
+    ch = channel_by_local(ctx, local_id);
+    if (!ch || (ch->state != CHSSH_CH_OPEN && ch->state != CHSSH_CH_READY)) {
+        return -1;
+    }
+    if (cols == 0) {
+        cols = 80;
+    }
+    if (rows == 0) {
+        rows = 24;
+    }
+    ch->pty_cols = cols;
+    ch->pty_rows = rows;
+    pl[off++] = CHSSH_MSG_CHANNEL_REQUEST;
+    put_u32(pl + off, ch->peer_id);
+    off += 4;
+    put_u32(pl + off, (uint32_t)nr);
+    off += 4;
+    memcpy(pl + off, req, nr);
+    off += nr;
+    pl[off++] = 0; /* want_reply = false */
+    put_u32(pl + off, cols);
+    off += 4;
+    put_u32(pl + off, rows);
+    off += 4;
+    put_u32(pl + off, 0); /* width_px */
+    off += 4;
+    put_u32(pl + off, 0); /* height_px */
+    off += 4;
+    return chssh_i_send_packet(ctx, pl, off);
+}
+
 int chssh_channel_request_decide(chssh_ctx_t *ctx, uint32_t local_id,
                                  int accept)
 {

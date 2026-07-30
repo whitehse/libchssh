@@ -315,6 +315,13 @@ int chssh_channel_request_pty(chssh_ctx_t *ctx, uint32_t local_id,
                               const char *term, uint32_t cols, uint32_t rows);
 
 /**
+ * Send CHANNEL_REQUEST "window-change" (no want_reply). Used for browser
+ * xterm.js resize → CPE PTY TIOCSWINSZ path.
+ */
+int chssh_channel_window_change(chssh_ctx_t *ctx, uint32_t local_id,
+                                uint32_t cols, uint32_t rows);
+
+/**
  * Accept or reject a pending channel request (shell) after CHSSH_EVENT_SHELL.
  * @return 0 ok, -1 no pending / error.
  */
