@@ -3006,6 +3006,43 @@ int chssh_channel_send(chssh_ctx_t *ctx, const uint8_t *data, size_t len)
     return chssh_channel_send_id(ctx, ch->local_id, data, len);
 }
 
+int chssh_channel_close(chssh_ctx_t *ctx, uint32_t local_id)
+{
+    chssh_channel_t *ch;
+    uint8_t pl[8];
+    size_t off;
+
+    if (!ctx || ctx->error) {
+        return -1;
+    }
+    ch = channel_by_local(ctx, local_id);
+    if (!ch) {
+        return -1;
+    }
+    if (ch->state == CHSSH_CH_FREE || ch->state == CHSSH_CH_CLOSED) {
+        return 0;
+    }
+    /* EOF then CLOSE (best-effort) so peer can drop sticky reverse shells. */
+    if (ch->peer_id != 0) {
+        if (ch->state != CHSSH_CH_EOF_RCVD) {
+            off = 0;
+            pl[off++] = CHSSH_MSG_CHANNEL_EOF;
+            put_u32(pl + off, ch->peer_id);
+            off += 4;
+            (void)chssh_i_send_packet(ctx, pl, off);
+        }
+        off = 0;
+        pl[off++] = CHSSH_MSG_CHANNEL_CLOSE;
+        put_u32(pl + off, ch->peer_id);
+        off += 4;
+        if (chssh_i_send_packet(ctx, pl, off) != 0) {
+            return -1;
+        }
+    }
+    ch->state = CHSSH_CH_CLOSED;
+    return 0;
+}
+
 int chssh_channel_is_ready(const chssh_ctx_t *ctx, uint32_t local_id)
 {
     size_t i;

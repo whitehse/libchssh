@@ -422,6 +422,13 @@ int chssh_channel_send(chssh_ctx_t *ctx, const uint8_t *data, size_t len);
 int chssh_channel_is_ready(const chssh_ctx_t *ctx, uint32_t local_id);
 
 /**
+ * Send CHANNEL_EOF then CHANNEL_CLOSE for @p local_id (best-effort).
+ * Used when a reverse staff shell PTY dies so the peer drops sticky state.
+ * @return 0 ok (or already closed), -1 unknown channel / send fail.
+ */
+int chssh_channel_close(chssh_ctx_t *ctx, uint32_t local_id);
+
+/**
  * Send a transport keepalive after keys are active (post-NEWKEYS).
  * Uses OpenSSH-compatible SSH_MSG_GLOBAL_REQUEST "keepalive@openssh.com"
  * (want_reply=1). Peer SUCCESS/FAILURE is ignored. Safe once encrypt_out
