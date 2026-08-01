@@ -510,6 +510,48 @@ int chssh_pubkey_blob_encode_ed25519(const uint8_t pk[32], uint8_t *out,
 /** Wire algorithm name for @p alg, or NULL if unknown. */
 const char *chssh_pubkey_alg_name(chssh_pubkey_alg_t alg);
 
+/* --- Identity + userauth signatures (PR-1b RSA / PR-1c ed25519) --- */
+
+/**
+ * RFC 4252 §7 publickey signature message (session id string +
+ * USERAUTH_REQUEST fields with signature-follows = TRUE).
+ */
+int chssh_userauth_build_signed_data(const uint8_t *session_id,
+                                     size_t session_id_len,
+                                     const char *username, const char *service,
+                                     const char *pk_alg,
+                                     const uint8_t *pubkey_blob,
+                                     size_t pubkey_blob_len, uint8_t *out,
+                                     size_t cap, size_t *out_len);
+
+/**
+ * Opaque private identity (RSA PEM/PKCS#8/OpenSSH, or ed25519 OpenSSH).
+ * Passphrase-protected keys rejected.
+ */
+typedef struct chssh_identity chssh_identity_t;
+
+chssh_identity_t *chssh_identity_load_file(const char *path);
+chssh_identity_t *chssh_identity_load_mem(const void *data, size_t len);
+void              chssh_identity_free(chssh_identity_t *id);
+
+chssh_pubkey_alg_t chssh_identity_alg(const chssh_identity_t *id);
+/** "rsa-sha2-256" or "ssh-ed25519". */
+const char *chssh_identity_sig_alg(const chssh_identity_t *id);
+int chssh_identity_public_blob(const chssh_identity_t *id, uint8_t *out,
+                               size_t cap, size_t *out_len);
+/** SSH signature blob: string alg || string raw. */
+int chssh_identity_sign(const chssh_identity_t *id, const uint8_t *msg,
+                        size_t msg_len, uint8_t *sig_out, size_t cap,
+                        size_t *sig_len);
+
+/**
+ * Verify userauth (or host-key) signature over @p msg with public key blob.
+ * @p pk_alg: rsa-sha2-256 | ssh-rsa | ssh-ed25519
+ */
+int chssh_userauth_verify(const char *pk_alg, const uint8_t *pubkey_blob,
+                          size_t pubkey_blob_len, const uint8_t *sig_blob,
+                          size_t sig_len, const uint8_t *msg, size_t msg_len);
+
 #ifdef __cplusplus
 }
 #endif

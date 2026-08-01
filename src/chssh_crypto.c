@@ -4,6 +4,8 @@
  */
 
 #include "chssh_crypto.h"
+#include "chssh_openssh_key.h"
+#include "chssh.h"
 
 #if HAVE_OPENSSL
 
@@ -16,6 +18,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <ctype.h>
 
 /* RFC 3526 2048-bit MODP Group 14 */
 static const char *GROUP14_P_HEX =
@@ -34,6 +37,39 @@ static const char *GROUP14_P_HEX =
 struct chssh_rsa_key {
     EVP_PKEY *pkey;
 };
+
+struct chssh_ed25519_key {
+    EVP_PKEY *pkey;
+};
+
+static int pem_is_encrypted(const char *pem, size_t len)
+{
+    size_t i;
+    if (!pem) {
+        return 0;
+    }
+    for (i = 0; i + 10 < len; i++) {
+        if (strncmp(pem + i, "ENCRYPTED", 9) == 0) {
+            return 1;
+        }
+        if (strncmp(pem + i, "Proc-Type:", 10) == 0) {
+            return 1;
+        }
+        if (strncmp(pem + i, "DEK-Info:", 9) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int pem_password_reject(char *buf, int size, int rwflag, void *u)
+{
+    (void)buf;
+    (void)size;
+    (void)rwflag;
+    (void)u;
+    return 0; /* refuse passphrase */
+}
 
 struct chssh_dh_ctx {
     BIGNUM *p;
@@ -161,19 +197,34 @@ chssh_rsa_key_t *chssh_rsa_generate(int bits)
 
 chssh_rsa_key_t *chssh_rsa_load_pem(const char *path)
 {
-    FILE *f;
+    uint8_t *data = NULL;
+    size_t len = 0;
     chssh_rsa_key_t *k;
-    EVP_PKEY *pkey;
+    if (chssh_read_file(path, &data, &len) != 0) {
+        return NULL;
+    }
+    k = chssh_rsa_load_pem_mem(data, len);
+    free(data);
+    return k;
+}
 
-    if (!path || !path[0]) {
+chssh_rsa_key_t *chssh_rsa_load_pem_mem(const void *pem, size_t pem_len)
+{
+    BIO *bio;
+    EVP_PKEY *pkey;
+    chssh_rsa_key_t *k;
+    if (!pem || pem_len == 0) {
         return NULL;
     }
-    f = fopen(path, "r");
-    if (!f) {
+    if (pem_is_encrypted((const char *)pem, pem_len)) {
         return NULL;
     }
-    pkey = PEM_read_PrivateKey(f, NULL, NULL, NULL);
-    fclose(f);
+    bio = BIO_new_mem_buf(pem, (int)pem_len);
+    if (!bio) {
+        return NULL;
+    }
+    pkey = PEM_read_bio_PrivateKey(bio, NULL, pem_password_reject, NULL);
+    BIO_free(bio);
     if (!pkey || EVP_PKEY_base_id(pkey) != EVP_PKEY_RSA) {
         EVP_PKEY_free(pkey);
         return NULL;
@@ -187,6 +238,84 @@ chssh_rsa_key_t *chssh_rsa_load_pem(const char *path)
     return k;
 }
 
+static chssh_rsa_key_t *rsa_from_openssh_decoded(const chssh_openssh_decoded_t *d)
+{
+    RSA *rsa = NULL;
+    EVP_PKEY *pkey = NULL;
+    BIGNUM *n = NULL, *e = NULL, *dd = NULL, *p = NULL, *q = NULL;
+    chssh_rsa_key_t *k;
+    if (!d || d->alg != CHSSH_PUBKEY_ALG_SSH_RSA) {
+        return NULL;
+    }
+    n = BN_bin2bn(d->rsa_n, (int)d->rsa_n_len, NULL);
+    e = BN_bin2bn(d->rsa_e, (int)d->rsa_e_len, NULL);
+    dd = BN_bin2bn(d->rsa_d, (int)d->rsa_d_len, NULL);
+    p = BN_bin2bn(d->rsa_p, (int)d->rsa_p_len, NULL);
+    q = BN_bin2bn(d->rsa_q, (int)d->rsa_q_len, NULL);
+    rsa = RSA_new();
+    if (!n || !e || !dd || !rsa || RSA_set0_key(rsa, n, e, dd) != 1) {
+        BN_free(n);
+        BN_free(e);
+        BN_free(dd);
+        BN_free(p);
+        BN_free(q);
+        RSA_free(rsa);
+        return NULL;
+    }
+    n = e = dd = NULL;
+    if (p && q) {
+        if (RSA_set0_factors(rsa, p, q) != 1) {
+            BN_free(p);
+            BN_free(q);
+            RSA_free(rsa);
+            return NULL;
+        }
+        p = q = NULL;
+    } else {
+        BN_free(p);
+        BN_free(q);
+        p = q = NULL;
+    }
+    pkey = EVP_PKEY_new();
+    if (!pkey || EVP_PKEY_assign_RSA(pkey, rsa) != 1) {
+        RSA_free(rsa);
+        EVP_PKEY_free(pkey);
+        return NULL;
+    }
+    k = (chssh_rsa_key_t *)calloc(1, sizeof(*k));
+    if (!k) {
+        EVP_PKEY_free(pkey);
+        return NULL;
+    }
+    k->pkey = pkey;
+    return k;
+}
+
+chssh_rsa_key_t *chssh_rsa_load_openssh_mem(const void *pem, size_t pem_len)
+{
+    chssh_openssh_decoded_t d;
+    chssh_rsa_key_t *k;
+    if (chssh_openssh_decode_pem((const char *)pem, pem_len, &d) != 0) {
+        return NULL;
+    }
+    k = rsa_from_openssh_decoded(&d);
+    chssh_openssh_decoded_clear(&d);
+    return k;
+}
+
+chssh_rsa_key_t *chssh_rsa_load_openssh(const char *path)
+{
+    uint8_t *data = NULL;
+    size_t len = 0;
+    chssh_rsa_key_t *k;
+    if (chssh_read_file(path, &data, &len) != 0) {
+        return NULL;
+    }
+    k = chssh_rsa_load_openssh_mem(data, len);
+    free(data);
+    return k;
+}
+
 void chssh_rsa_free(chssh_rsa_key_t *k)
 {
     if (!k) {
@@ -194,6 +323,194 @@ void chssh_rsa_free(chssh_rsa_key_t *k)
     }
     EVP_PKEY_free(k->pkey);
     free(k);
+}
+
+/* --- ed25519 --- */
+
+chssh_ed25519_key_t *chssh_ed25519_generate(void)
+{
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *pctx;
+    chssh_ed25519_key_t *k;
+    pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, NULL);
+    if (!pctx || EVP_PKEY_keygen_init(pctx) <= 0 ||
+        EVP_PKEY_keygen(pctx, &pkey) <= 0) {
+        EVP_PKEY_CTX_free(pctx);
+        EVP_PKEY_free(pkey);
+        return NULL;
+    }
+    EVP_PKEY_CTX_free(pctx);
+    k = (chssh_ed25519_key_t *)calloc(1, sizeof(*k));
+    if (!k) {
+        EVP_PKEY_free(pkey);
+        return NULL;
+    }
+    k->pkey = pkey;
+    return k;
+}
+
+chssh_ed25519_key_t *chssh_ed25519_load_openssh_mem(const void *pem,
+                                                    size_t pem_len)
+{
+    chssh_openssh_decoded_t d;
+    EVP_PKEY *pkey;
+    chssh_ed25519_key_t *k;
+    if (chssh_openssh_decode_pem((const char *)pem, pem_len, &d) != 0) {
+        return NULL;
+    }
+    if (d.alg != CHSSH_PUBKEY_ALG_SSH_ED25519) {
+        chssh_openssh_decoded_clear(&d);
+        return NULL;
+    }
+    pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, d.ed_seed, 32);
+    chssh_openssh_decoded_clear(&d);
+    if (!pkey) {
+        return NULL;
+    }
+    k = (chssh_ed25519_key_t *)calloc(1, sizeof(*k));
+    if (!k) {
+        EVP_PKEY_free(pkey);
+        return NULL;
+    }
+    k->pkey = pkey;
+    return k;
+}
+
+chssh_ed25519_key_t *chssh_ed25519_load_openssh(const char *path)
+{
+    uint8_t *data = NULL;
+    size_t len = 0;
+    chssh_ed25519_key_t *k;
+    if (chssh_read_file(path, &data, &len) != 0) {
+        return NULL;
+    }
+    k = chssh_ed25519_load_openssh_mem(data, len);
+    free(data);
+    return k;
+}
+
+void chssh_ed25519_free(chssh_ed25519_key_t *k)
+{
+    if (!k) {
+        return;
+    }
+    EVP_PKEY_free(k->pkey);
+    free(k);
+}
+
+int chssh_ed25519_public_blob(const chssh_ed25519_key_t *k, uint8_t *out,
+                              size_t cap, size_t *out_len)
+{
+    uint8_t raw[32];
+    size_t raw_len = sizeof(raw);
+    if (!k || !k->pkey || !out || !out_len) {
+        return -1;
+    }
+    if (EVP_PKEY_get_raw_public_key(k->pkey, raw, &raw_len) != 1 ||
+        raw_len != 32) {
+        return -1;
+    }
+    return chssh_pubkey_blob_encode_ed25519(raw, out, cap, out_len);
+}
+
+int chssh_ed25519_sign(const chssh_ed25519_key_t *k, const uint8_t *msg,
+                       size_t msg_len, uint8_t *out, size_t cap,
+                       size_t *out_len)
+{
+    EVP_MD_CTX *mdctx;
+    uint8_t sig[64];
+    size_t siglen = sizeof(sig);
+    size_t off = 0;
+    const char *alg = "ssh-ed25519";
+    size_t alglen = 11;
+    if (!k || !k->pkey || !msg || !out || !out_len) {
+        return -1;
+    }
+    mdctx = EVP_MD_CTX_new();
+    if (!mdctx || EVP_DigestSignInit(mdctx, NULL, NULL, NULL, k->pkey) <= 0 ||
+        EVP_DigestSign(mdctx, sig, &siglen, msg, msg_len) <= 0 || siglen != 64) {
+        EVP_MD_CTX_free(mdctx);
+        return -1;
+    }
+    EVP_MD_CTX_free(mdctx);
+    if (4 + alglen + 4 + 64 > cap) {
+        return -1;
+    }
+    put_u32(out + off, (uint32_t)alglen);
+    off += 4;
+    memcpy(out + off, alg, alglen);
+    off += alglen;
+    put_u32(out + off, 64);
+    off += 4;
+    memcpy(out + off, sig, 64);
+    off += 64;
+    *out_len = off;
+    return 0;
+}
+
+int chssh_ed25519_verify(const uint8_t *pubkey_blob, size_t blob_len,
+                         const uint8_t *sig_blob, size_t sig_len,
+                         const uint8_t *msg, size_t msg_len)
+{
+    chssh_pubkey_alg_t alg;
+    uint32_t tlen, slen, rawlen;
+    size_t off = 0;
+    const uint8_t *raw_pk;
+    const uint8_t *raw_sig;
+    EVP_PKEY *pkey;
+    EVP_MD_CTX *mdctx;
+    int ok = -1;
+
+    if (!pubkey_blob || !sig_blob || !msg) {
+        return -1;
+    }
+    if (chssh_pubkey_blob_parse(pubkey_blob, blob_len, &alg) != 0 ||
+        alg != CHSSH_PUBKEY_ALG_SSH_ED25519) {
+        return -1;
+    }
+    /* pub: string type || string 32 */
+    tlen = ((uint32_t)pubkey_blob[0] << 24) | ((uint32_t)pubkey_blob[1] << 16) |
+           ((uint32_t)pubkey_blob[2] << 8) | (uint32_t)pubkey_blob[3];
+    off = 4 + tlen;
+    if (off + 4 > blob_len) {
+        return -1;
+    }
+    slen = ((uint32_t)pubkey_blob[off] << 24) |
+           ((uint32_t)pubkey_blob[off + 1] << 16) |
+           ((uint32_t)pubkey_blob[off + 2] << 8) |
+           (uint32_t)pubkey_blob[off + 3];
+    off += 4;
+    if (slen != 32 || off + 32 > blob_len) {
+        return -1;
+    }
+    raw_pk = pubkey_blob + off;
+    /* sig: string "ssh-ed25519" || string 64 */
+    if (sig_len < 4 + 11 + 4 + 64) {
+        return -1;
+    }
+    tlen = ((uint32_t)sig_blob[0] << 24) | ((uint32_t)sig_blob[1] << 16) |
+           ((uint32_t)sig_blob[2] << 8) | (uint32_t)sig_blob[3];
+    if (tlen != 11 || memcmp(sig_blob + 4, "ssh-ed25519", 11) != 0) {
+        return -1;
+    }
+    rawlen = ((uint32_t)sig_blob[15] << 24) | ((uint32_t)sig_blob[16] << 16) |
+             ((uint32_t)sig_blob[17] << 8) | (uint32_t)sig_blob[18];
+    if (rawlen != 64 || 19 + 64 > sig_len) {
+        return -1;
+    }
+    raw_sig = sig_blob + 19;
+    pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, NULL, raw_pk, 32);
+    if (!pkey) {
+        return -1;
+    }
+    mdctx = EVP_MD_CTX_new();
+    if (mdctx && EVP_DigestVerifyInit(mdctx, NULL, NULL, NULL, pkey) > 0 &&
+        EVP_DigestVerify(mdctx, raw_sig, 64, msg, msg_len) == 1) {
+        ok = 0;
+    }
+    EVP_MD_CTX_free(mdctx);
+    EVP_PKEY_free(pkey);
+    return ok;
 }
 
 int chssh_rsa_public_blob(const chssh_rsa_key_t *k, uint8_t *out, size_t cap,
@@ -827,6 +1144,7 @@ done:
 #include <string.h>
 
 struct chssh_rsa_key { int dummy; };
+struct chssh_ed25519_key { int dummy; };
 struct chssh_dh_ctx { int dummy; };
 struct chssh_cipher { int dummy; };
 struct chssh_hash_ctx { int dummy; };
@@ -878,29 +1196,93 @@ int chssh_rsa_public_blob(const chssh_rsa_key_t *k, uint8_t *out, size_t cap,
     (void)out_len;
     return -1;
 }
+chssh_rsa_key_t *chssh_rsa_load_pem_mem(const void *pem, size_t pem_len)
+{
+    (void)pem;
+    (void)pem_len;
+    return NULL;
+}
+chssh_rsa_key_t *chssh_rsa_load_openssh_mem(const void *pem, size_t pem_len)
+{
+    (void)pem;
+    (void)pem_len;
+    return NULL;
+}
+chssh_rsa_key_t *chssh_rsa_load_openssh(const char *path)
+{
+    (void)path;
+    return NULL;
+}
 int chssh_rsa_sign(const chssh_rsa_key_t *k, const char *sig_alg,
-                   const uint8_t *H, size_t H_len, uint8_t *out, size_t cap,
+                   const uint8_t *msg, size_t msg_len, uint8_t *out, size_t cap,
                    size_t *out_len)
 {
     (void)k;
     (void)sig_alg;
-    (void)H;
-    (void)H_len;
+    (void)msg;
+    (void)msg_len;
     (void)out;
     (void)cap;
     (void)out_len;
     return -1;
 }
-int chssh_rsa_verify(const uint8_t *host_key_blob, size_t hk_len,
+int chssh_rsa_verify(const uint8_t *pubkey_blob, size_t blob_len,
                      const uint8_t *sig_blob, size_t sig_len,
-                     const uint8_t *H, size_t H_len)
+                     const uint8_t *msg, size_t msg_len)
 {
-    (void)host_key_blob;
-    (void)hk_len;
+    (void)pubkey_blob;
+    (void)blob_len;
     (void)sig_blob;
     (void)sig_len;
-    (void)H;
-    (void)H_len;
+    (void)msg;
+    (void)msg_len;
+    return -1;
+}
+chssh_ed25519_key_t *chssh_ed25519_generate(void) { return NULL; }
+chssh_ed25519_key_t *chssh_ed25519_load_openssh_mem(const void *pem,
+                                                    size_t pem_len)
+{
+    (void)pem;
+    (void)pem_len;
+    return NULL;
+}
+chssh_ed25519_key_t *chssh_ed25519_load_openssh(const char *path)
+{
+    (void)path;
+    return NULL;
+}
+void chssh_ed25519_free(chssh_ed25519_key_t *k) { free(k); }
+int chssh_ed25519_public_blob(const chssh_ed25519_key_t *k, uint8_t *out,
+                              size_t cap, size_t *out_len)
+{
+    (void)k;
+    (void)out;
+    (void)cap;
+    (void)out_len;
+    return -1;
+}
+int chssh_ed25519_sign(const chssh_ed25519_key_t *k, const uint8_t *msg,
+                       size_t msg_len, uint8_t *out, size_t cap,
+                       size_t *out_len)
+{
+    (void)k;
+    (void)msg;
+    (void)msg_len;
+    (void)out;
+    (void)cap;
+    (void)out_len;
+    return -1;
+}
+int chssh_ed25519_verify(const uint8_t *pubkey_blob, size_t blob_len,
+                         const uint8_t *sig_blob, size_t sig_len,
+                         const uint8_t *msg, size_t msg_len)
+{
+    (void)pubkey_blob;
+    (void)blob_len;
+    (void)sig_blob;
+    (void)sig_len;
+    (void)msg;
+    (void)msg_len;
     return -1;
 }
 chssh_dh_ctx_t *chssh_dh_new(void) { return NULL; }

@@ -105,4 +105,9 @@ SFTP/TUN/TAP are named subsystems; host/agent runs `sftp-server` or TUN/TAP fds.
 - known_hosts pinning (client accepts any when `accept_any_hostkey`; pin API later — PR-3).
 - Public key helpers (PR-1a): `chssh_pubkey_*` in `src/chssh_pubkey.c` — OpenSSH
   SHA256 fingerprints, RSA/ed25519 wire blob parse/encode, authorized_keys line
-  codec. Userauth publickey wire is PR-1b/1c/2.
+  codec.
+- Userauth crypto (PR-1b/1c): `chssh_identity_*`, `chssh_userauth_build_signed_data`,
+  `chssh_userauth_verify` — RSA (`rsa-sha2-256`) and ed25519 signatures over the
+  RFC 4252 §7 message. OpenSSH unencrypted private keys via
+  `src/chssh_openssh_key.c`. mbedTLS ed25519 uses portable orlp/ed25519
+  (`third_party/ed25519/`). Wire SM (AUTH_PUBLICKEY events) is PR-2.

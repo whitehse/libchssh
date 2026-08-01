@@ -11,7 +11,25 @@ else()
     add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 endif()
 
-add_library(chssh STATIC src/chssh.c src/chssh_crypto.c src/chssh_pubkey.c)
+set(CHSSH_ED25519_SOURCES
+    third_party/ed25519/fe.c
+    third_party/ed25519/ge.c
+    third_party/ed25519/sc.c
+    third_party/ed25519/keypair.c
+    third_party/ed25519/sign.c
+    third_party/ed25519/verify.c
+    third_party/ed25519/sha512.c
+    third_party/ed25519/seed.c
+)
+
+add_library(chssh STATIC
+    src/chssh.c
+    src/chssh_crypto.c
+    src/chssh_pubkey.c
+    src/chssh_openssh_key.c
+    src/chssh_identity.c
+    ${CHSSH_ED25519_SOURCES}
+)
 
 target_include_directories(chssh PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -19,7 +37,13 @@ target_include_directories(chssh PUBLIC
 )
 target_include_directories(chssh PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ed25519
 )
+# orlp ed25519 is third-party; relax -Werror noise on older C style
+if(NOT MSVC)
+    set_source_files_properties(${CHSSH_ED25519_SOURCES} PROPERTIES
+        COMPILE_FLAGS "-Wno-error -Wno-unused-parameter -Wno-sign-conversion")
+endif()
 # OpenSSL 3 still uses RSA_set0_key for public key assembly from SSH blobs.
 if(NOT MSVC)
     set_source_files_properties(src/chssh_crypto.c PROPERTIES
@@ -137,6 +161,10 @@ add_test(NAME chssh_hostkey_pem COMMAND chssh_hostkey_pem_test)
 add_executable(chssh_pubkey_test tests/test_chssh_pubkey.c)
 target_link_libraries(chssh_pubkey_test PRIVATE chssh)
 add_test(NAME chssh_pubkey COMMAND chssh_pubkey_test)
+
+add_executable(chssh_userauth_crypto_test tests/test_chssh_userauth_crypto.c)
+target_link_libraries(chssh_userauth_crypto_test PRIVATE chssh)
+add_test(NAME chssh_userauth_crypto COMMAND chssh_userauth_crypto_test)
 
 # Optional OpenSSH client interop (TCP host + shell script; skips without sshpass)
 add_executable(chssh_openssh_server tests/chssh_openssh_server.c)

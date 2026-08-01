@@ -34,9 +34,14 @@ int  chssh_crypto_random(uint8_t *buf, size_t len);
 /** "openssl" | "mbedtls" | "none" */
 const char *chssh_crypto_backend(void);
 
-/* --- RSA host key (ssh-rsa / rsa-sha2-256) --- */
+/* --- RSA host key / userauth (ssh-rsa / rsa-sha2-256) --- */
 chssh_rsa_key_t *chssh_rsa_generate(int bits); /* ephemeral, typically 2048 */
 chssh_rsa_key_t *chssh_rsa_load_pem(const char *path);
+/** PEM/PKCS#8 bytes in memory; rejects encrypted PEMs. */
+chssh_rsa_key_t *chssh_rsa_load_pem_mem(const void *pem, size_t pem_len);
+/** Unencrypted OpenSSH private key (BEGIN OPENSSH PRIVATE KEY). */
+chssh_rsa_key_t *chssh_rsa_load_openssh_mem(const void *pem, size_t pem_len);
+chssh_rsa_key_t *chssh_rsa_load_openssh(const char *path);
 void             chssh_rsa_free(chssh_rsa_key_t *k);
 
 /** RFC 4253 public key blob: string "ssh-rsa" || mpint e || mpint n */
@@ -44,18 +49,38 @@ int chssh_rsa_public_blob(const chssh_rsa_key_t *k, uint8_t *out, size_t cap,
                           size_t *out_len);
 
 /**
- * Sign exchange hash H.
+ * Sign message with RSA (host-key over H or userauth over RFC 4252 §7 data).
  * @p sig_alg "rsa-sha2-256" or "ssh-rsa"
  * Output: string alg || string sigblob
  */
 int chssh_rsa_sign(const chssh_rsa_key_t *k, const char *sig_alg,
-                   const uint8_t *H, size_t H_len, uint8_t *out, size_t cap,
+                   const uint8_t *msg, size_t msg_len, uint8_t *out, size_t cap,
                    size_t *out_len);
 
-/** Verify peer host key signature over H. */
-int chssh_rsa_verify(const uint8_t *host_key_blob, size_t hk_len,
+/**
+ * Verify RSA signature over @p msg using SSH public key blob.
+ * Used for host-key (msg=H) and publickey userauth (msg=signed data).
+ */
+int chssh_rsa_verify(const uint8_t *pubkey_blob, size_t blob_len,
                      const uint8_t *sig_blob, size_t sig_len,
-                     const uint8_t *H, size_t H_len);
+                     const uint8_t *msg, size_t msg_len);
+
+/* --- ed25519 userauth (PR-1c); not used as host key in v1 --- */
+typedef struct chssh_ed25519_key chssh_ed25519_key_t;
+chssh_ed25519_key_t *chssh_ed25519_generate(void);
+chssh_ed25519_key_t *chssh_ed25519_load_openssh_mem(const void *pem,
+                                                    size_t pem_len);
+chssh_ed25519_key_t *chssh_ed25519_load_openssh(const char *path);
+void                 chssh_ed25519_free(chssh_ed25519_key_t *k);
+int chssh_ed25519_public_blob(const chssh_ed25519_key_t *k, uint8_t *out,
+                              size_t cap, size_t *out_len);
+/** SSH signature: string "ssh-ed25519" || string (64-byte sig). */
+int chssh_ed25519_sign(const chssh_ed25519_key_t *k, const uint8_t *msg,
+                       size_t msg_len, uint8_t *out, size_t cap,
+                       size_t *out_len);
+int chssh_ed25519_verify(const uint8_t *pubkey_blob, size_t blob_len,
+                         const uint8_t *sig_blob, size_t sig_len,
+                         const uint8_t *msg, size_t msg_len);
 
 /* --- Diffie-Hellman group14 --- */
 chssh_dh_ctx_t *chssh_dh_new(void);
