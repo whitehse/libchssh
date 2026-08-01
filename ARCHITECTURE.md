@@ -117,3 +117,5 @@ SFTP/TUN/TAP are named subsystems; host/agent runs `sftp-server` or TUN/TAP fds.
   `USERAUTH_FAILURE`; server emits `CHSSH_EVENT_AUTH_PUBLICKEY` (query or
   verified-sig), `chssh_auth_decide` → SUCCESS / FAILURE / PK_OK; crypto
   verify before host event (K11); reject does not tear down the session (K12).
+- Pre-PR-3 behavior was “always accept host key after crypto verify”; product
+  configs now fail closed without pin / decide.
