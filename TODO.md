@@ -33,7 +33,7 @@
 - [x] Public key blob parse/encode + SHA256 fingerprint (PR-1a; ed25519+RSA)
 - [x] RSA userauth sign/verify + PEM/OpenSSH load (PR-1b; both backends)
 - [x] ed25519 userauth sign/verify + OpenSSH load (PR-1c; OpenSSL + portable for mbedTLS)
-- [ ] Dual-auth SM + AUTH_PUBLICKEY events (PR-2)
+- [x] Dual-auth SM + AUTH_PUBLICKEY / PK_OK / FAILURE retry (PR-2)
 - [ ] Host key pin / known_hosts for client role (PR-3)
 - [x] edgehost `e7_callhome` integration (libchssh preferred path)
 - [ ] libnetconf optional backend via libchssh

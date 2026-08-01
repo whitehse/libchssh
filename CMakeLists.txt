@@ -166,6 +166,10 @@ add_executable(chssh_userauth_crypto_test tests/test_chssh_userauth_crypto.c)
 target_link_libraries(chssh_userauth_crypto_test PRIVATE chssh)
 add_test(NAME chssh_userauth_crypto COMMAND chssh_userauth_crypto_test)
 
+add_executable(chssh_dual_auth_test tests/test_chssh_dual_auth.c)
+target_link_libraries(chssh_dual_auth_test PRIVATE chssh)
+add_test(NAME chssh_dual_auth COMMAND chssh_dual_auth_test)
+
 # Optional OpenSSH client interop (TCP host + shell script; skips without sshpass)
 add_executable(chssh_openssh_server tests/chssh_openssh_server.c)
 target_link_libraries(chssh_openssh_server PRIVATE chssh)

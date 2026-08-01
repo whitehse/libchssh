@@ -26,6 +26,7 @@
 #define CHSSH_MSG_USERAUTH_FAILURE      51
 #define CHSSH_MSG_USERAUTH_SUCCESS      52
 #define CHSSH_MSG_USERAUTH_BANNER       53
+#define CHSSH_MSG_USERAUTH_PK_OK        60
 #define CHSSH_MSG_GLOBAL_REQUEST        80
 #define CHSSH_MSG_REQUEST_SUCCESS       81
 #define CHSSH_MSG_REQUEST_FAILURE       82
@@ -139,6 +140,18 @@ struct chssh_ctx {
     char pending_user[CHSSH_USER_MAX + 1];
     char pending_pass[CHSSH_PASS_MAX + 1];
     int pending_is_none;
+    /* PR-2 dual-auth / publickey */
+    int auth_pend_kind; /* 0 none, 1 none-method, 2 password, 3 pk-query, 4 pk-signed */
+    int client_auth_stage; /* 0 idle, 1 pubkey-sent, 2 password-sent */
+    int server_auth_attempts;
+    int server_offer_publickey;
+    int server_offer_password;
+    int server_max_auth_attempts;
+    chssh_identity_t *client_identity; /* owned; client role */
+    uint8_t *pk_pending_blob;          /* server pending publickey blob */
+    size_t pk_pending_blob_len;
+    char pk_pending_algo[CHSSH_ALGO_MAX];
+    char pk_pending_fp[CHSSH_FP_SHA256_MAX];
 
     /* Production crypto */
     chssh_rsa_key_t *host_key;       /* server host key; client unused */

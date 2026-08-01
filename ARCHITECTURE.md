@@ -110,4 +110,8 @@ SFTP/TUN/TAP are named subsystems; host/agent runs `sftp-server` or TUN/TAP fds.
   `chssh_userauth_verify` — RSA (`rsa-sha2-256`) and ed25519 signatures over the
   RFC 4252 §7 message. OpenSSH unencrypted private keys via
   `src/chssh_openssh_key.c`. mbedTLS ed25519 uses portable orlp/ed25519
-  (`third_party/ed25519/`). Wire SM (AUTH_PUBLICKEY events) is PR-2.
+  (`third_party/ed25519/`).
+- Dual-auth wire (PR-2): client tries publickey then password on
+  `USERAUTH_FAILURE`; server emits `CHSSH_EVENT_AUTH_PUBLICKEY` (query or
+  verified-sig), `chssh_auth_decide` → SUCCESS / FAILURE / PK_OK; crypto
+  verify before host event (K11); reject does not tear down the session (K12).

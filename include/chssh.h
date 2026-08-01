@@ -88,14 +88,31 @@ typedef struct {
 
     /* --- Server (CALLHOME) expected credentials; NULL password rejects all --- */
     const char *server_username; /* NULL = any username */
-    const char *server_password; /* NULL = reject password auth */
+    const char *server_password; /* NULL = reject password auth (auto-decide) */
 
     /* --- Client credentials --- */
     const char *client_username;
     const char *client_password;
+    /**
+     * Client publickey identity (PR-2 dual-auth). Unencrypted OpenSSH or RSA PEM.
+     * Tried before password when load succeeds. Host-owned path/PEM lifetime
+     * must cover chssh_create…destroy.
+     */
+    const char *client_private_key_path;
+    const char *client_private_key_pem; /* optional alternate to path */
 
     int accept_any_hostkey; /* CLIENT lab: accept peer host key without pin */
     int allow_none_auth;    /* SERVER lab: allow USERAUTH none */
+
+    /**
+     * SERVER method advertisement (PR-2). Zero-init defaults after create:
+     * offer password=1, offer publickey=1 when production crypto available.
+     * Set explicitly to 0 to disable a method.
+     */
+    int server_offer_publickey;
+    int server_offer_password;
+    /** SERVER max userauth attempts; 0 → default 6. */
+    int server_max_auth_attempts;
 
     const char *host_key_path; /* SERVER: PEM path; NULL = ephemeral when possible */
 
@@ -156,6 +173,7 @@ typedef enum {
     /* Auth: plumbing emits request; caller may call chssh_auth_decide (server) */
     CHSSH_EVENT_AUTH_PASSWORD,   /* server: peer offered password */
     CHSSH_EVENT_AUTH_NONE,       /* server: peer tried none */
+    CHSSH_EVENT_AUTH_PUBLICKEY,  /* server: publickey query or verified sig */
     CHSSH_EVENT_AUTHENTICATED,
 
     CHSSH_EVENT_CHANNEL_OPEN,    /* session channel open (u.channel) */
@@ -190,6 +208,14 @@ typedef enum {
 #define CHSSH_TERM_MAX  32
 #define CHSSH_ADDR_MAX  255
 #define CHSSH_CMD_MAX   512   /* CHANNEL_REQUEST exec command string */
+/** OpenSSH-style SHA256 fingerprint string: "SHA256:" + unpadded base64. */
+#define CHSSH_FP_SHA256_MAX 96
+/** Max algorithm name (e.g. ssh-ed25519, rsa-sha2-256). */
+#define CHSSH_ALGO_MAX 64
+/** Max SSH public key wire blob (RSA-4096-ish + headroom). */
+#define CHSSH_PUBKEY_BLOB_MAX 8192
+/** Max authorized_keys line when encoding. */
+#define CHSSH_OPENSSH_LINE_MAX 16384
 
 typedef struct {
     chssh_event_type_t type;
@@ -202,6 +228,18 @@ typedef struct {
             char     username[CHSSH_USER_MAX + 1];
             char     password[CHSSH_PASS_MAX + 1];
         } auth;
+        /**
+         * AUTH_PUBLICKEY: pointers valid until chssh_auth_decide / next
+         * pending auth event. Host should copy fingerprint if needed.
+         */
+        struct {
+            char     username[CHSSH_USER_MAX + 1];
+            char     algo[CHSSH_ALGO_MAX];
+            const uint8_t *public_blob;
+            size_t   public_blob_len;
+            char     fingerprint_sha256[CHSSH_FP_SHA256_MAX];
+            int      signature_present; /* 0=query, 1=signed+verified */
+        } auth_pk;
         struct {
             uint32_t channel_id; /* local channel id */
             char     name[CHSSH_SUBSYS_NAME_MAX + 1];
@@ -292,9 +330,13 @@ int chssh_ident_flushed(const chssh_ctx_t *ctx);
 int chssh_peer_ident_seen(const chssh_ctx_t *ctx);
 
 /**
- * Server: accept or reject the pending password/none auth from
- * CHSSH_EVENT_AUTH_PASSWORD / CHSSH_EVENT_AUTH_NONE.
- * If never called, library uses config server_password / allow_none_auth.
+ * Server: accept or reject pending auth from AUTH_PASSWORD / AUTH_NONE /
+ * AUTH_PUBLICKEY.
+ *   - password/none: SUCCESS or FAILURE (session stays open on reject)
+ *   - publickey query (signature_present=0): accept → PK_OK; reject → FAILURE
+ *   - publickey signed (signature_present=1): accept → SUCCESS; reject → FAILURE
+ * FAILURE advertises remaining offered methods. Invalid crypto signatures
+ * never raise AUTH_PUBLICKEY (library sends FAILURE itself).
  */
 int chssh_auth_decide(chssh_ctx_t *ctx, int accept);
 
@@ -441,16 +483,7 @@ int chssh_send_keepalive(chssh_ctx_t *ctx);
 /** Request orderly close (sends disconnect when possible). */
 int chssh_disconnect(chssh_ctx_t *ctx, const char *description);
 
-/* --- Public key blob / fingerprint helpers (PR-1a; no userauth yet) --- */
-
-/** OpenSSH-style SHA256 fingerprint string: "SHA256:" + unpadded base64. */
-#define CHSSH_FP_SHA256_MAX 96
-/** Max algorithm name (e.g. ssh-ed25519, rsa-sha2-256). */
-#define CHSSH_ALGO_MAX 64
-/** Max SSH public key wire blob (RSA-4096-ish + headroom). */
-#define CHSSH_PUBKEY_BLOB_MAX 8192
-/** Max authorized_keys line when encoding. */
-#define CHSSH_OPENSSH_LINE_MAX 16384
+/* --- Public key blob / fingerprint helpers (PR-1a) --- */
 
 typedef enum {
     CHSSH_PUBKEY_ALG_UNKNOWN = 0,
