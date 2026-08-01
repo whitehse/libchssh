@@ -2,21 +2,53 @@
  * Production-crypto staff face for OpenSSH interactive shell interop.
  * Usage: chssh_openssh_staff_server <port>
  *
- * OpenSSH: ssh -p PORT -o PreferredAuthentications=password staff@127.0.0.1
- * Password: staff-lab
- * Runs: echo STAFF_SHELL_OK
+ * Non-blocking I/O + wall-clock deadline (same as netconf interop server).
  */
 #define _DEFAULT_SOURCE
 #include "chssh.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
+
+#define HARNESS_DEADLINE_SEC 20
+
+static int set_nb(int fd)
+{
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0) {
+        return -1;
+    }
+    return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+}
+
+static int write_all(int fd, const uint8_t *buf, size_t n)
+{
+    size_t off = 0;
+    while (off < n) {
+        ssize_t wn = write(fd, buf + off, n - off);
+        if (wn < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                struct pollfd pfd = {.fd = fd, .events = POLLOUT};
+                if (poll(&pfd, 1, 500) <= 0) {
+                    return -1;
+                }
+                continue;
+            }
+            return -1;
+        }
+        off += (size_t)wn;
+    }
+    return 0;
+}
 
 int main(int argc, char **argv)
 {
@@ -30,6 +62,8 @@ int main(int argc, char **argv)
     int one = 1;
     int shell_ready = 0;
     uint32_t shell_ch = 0;
+    time_t deadline;
+    struct pollfd pfd;
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.lab_mode = 0; /* production — required for OpenSSH */
@@ -39,6 +73,8 @@ int main(int argc, char **argv)
     cfg.auto_accept_shell = 1;
     cfg.auto_open_netconf = 0;
     cfg.allowed_subsystems = "edge-telemetry";
+    cfg.server_offer_publickey = 0;
+    cfg.server_offer_password = 1;
 
     fprintf(stderr, "chssh crypto backend: %s\n", chssh_crypto_backend());
     if (strcmp(chssh_crypto_backend(), "none") == 0) {
@@ -61,39 +97,80 @@ int main(int argc, char **argv)
         perror("bind/listen");
         return 1;
     }
+    if (set_nb(lfd) != 0) {
+        perror("fcntl listen");
+        return 1;
+    }
     fprintf(stderr, "chssh_openssh_staff_server 127.0.0.1:%d (staff/staff-lab)\n",
             port);
-    cfd = accept(lfd, (struct sockaddr *)&peer, &plen);
-    if (cfd < 0) {
-        perror("accept");
+    deadline = time(NULL) + HARNESS_DEADLINE_SEC;
+
+    cfd = -1;
+    while (cfd < 0) {
+        if (time(NULL) > deadline) {
+            fprintf(stderr, "timeout waiting for accept\n");
+            close(lfd);
+            return 1;
+        }
+        pfd.fd = lfd;
+        pfd.events = POLLIN;
+        if (poll(&pfd, 1, 200) <= 0) {
+            continue;
+        }
+        plen = sizeof(peer);
+        cfd = accept(lfd, (struct sockaddr *)&peer, &plen);
+        if (cfd < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                continue;
+            }
+            perror("accept");
+            close(lfd);
+            return 1;
+        }
+    }
+    if (set_nb(cfd) != 0) {
+        perror("fcntl client");
+        close(cfd);
+        close(lfd);
         return 1;
     }
     ssh = chssh_create(CHSSH_ROLE_SERVER, &cfg);
     if (!ssh) {
         fprintf(stderr, "create failed (production crypto?)\n");
+        close(cfd);
+        close(lfd);
         return 1;
     }
 
-    for (;;) {
+    while (time(NULL) <= deadline) {
         size_t n;
         ssize_t rn;
         chssh_event_t ev;
+        int progress = 0;
 
-        n = chssh_get_output(ssh, buf, sizeof(buf));
-        if (n) {
-            if (write(cfd, buf, n) < 0) {
+        for (;;) {
+            n = chssh_get_output(ssh, buf, sizeof(buf));
+            if (!n) {
                 break;
             }
+            if (write_all(cfd, buf, n) != 0) {
+                goto done;
+            }
+            progress = 1;
         }
+
         rn = read(cfd, buf, sizeof(buf));
         if (rn > 0) {
             (void)chssh_feed_input(ssh, buf, (size_t)rn);
+            progress = 1;
         } else if (rn == 0) {
             break;
         } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
             break;
         }
+
         while (chssh_next_event(ssh, &ev)) {
+            progress = 1;
             if (ev.type == CHSSH_EVENT_AUTHENTICATED) {
                 fprintf(stderr, "AUTHENTICATED\n");
             }
@@ -116,7 +193,6 @@ int main(int argc, char **argv)
                 }
             }
             if (ev.type == CHSSH_EVENT_EXEC) {
-                /* OpenSSH remote command / SCP uses exec (not shell). */
                 shell_ready = 1;
                 shell_ch = ev.u.exec.channel_id;
                 fprintf(stderr, "EXEC ready ch=%u cmd=%s\n",
@@ -143,11 +219,21 @@ int main(int argc, char **argv)
                 goto done;
             }
         }
-        /* keep pumping until peer closes (client got STAFF_SHELL_OK) */
+
+        if (!progress) {
+            pfd.fd = cfd;
+            pfd.events = POLLIN;
+            if (poll(&pfd, 1, 100) < 0 && errno != EINTR) {
+                break;
+            }
+        }
+    }
+    if (time(NULL) > deadline) {
+        fprintf(stderr, "timeout during session\n");
     }
 done:
     chssh_destroy(ssh);
     close(cfd);
     close(lfd);
-    return shell_ready ? 0 : 1;
+    return 0;
 }

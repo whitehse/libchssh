@@ -181,7 +181,8 @@ add_test(NAME chssh_openssh_client
     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_chssh_openssh_client.sh)
 set_tests_properties(chssh_openssh_client PROPERTIES
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    ENVIRONMENT "PATH=${CMAKE_CURRENT_BINARY_DIR}:$ENV{PATH}")
+    ENVIRONMENT "PATH=${CMAKE_CURRENT_BINARY_DIR}:$ENV{PATH}"
+    TIMEOUT 30)
 
 # OpenSSH interactive staff shell (pty-req + shell; password auth)
 add_executable(chssh_openssh_staff_server tests/chssh_openssh_staff_server.c)
@@ -190,7 +191,8 @@ add_test(NAME chssh_openssh_staff
     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_chssh_openssh_staff.sh)
 set_tests_properties(chssh_openssh_staff PROPERTIES
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    ENVIRONMENT "PATH=${CMAKE_CURRENT_BINARY_DIR}:$ENV{PATH}")
+    ENVIRONMENT "PATH=${CMAKE_CURRENT_BINARY_DIR}:$ENV{PATH}"
+    TIMEOUT 30)
 
 option(ENABLE_FUZZ "Build fuzz harness (requires libFuzzer)" OFF)
 if(ENABLE_FUZZ)
