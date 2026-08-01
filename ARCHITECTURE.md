@@ -102,4 +102,7 @@ SFTP/TUN/TAP are named subsystems; host/agent runs `sftp-server` or TUN/TAP fds.
 - agent forwarding / X11.
 - Calix identity XML (host/edgehost).
 - NETCONF XML framing (libnetconf).
-- known_hosts pinning (client accepts any when `accept_any_hostkey`; pin API later).
+- known_hosts pinning (client accepts any when `accept_any_hostkey`; pin API later — PR-3).
+- Public key helpers (PR-1a): `chssh_pubkey_*` in `src/chssh_pubkey.c` — OpenSSH
+  SHA256 fingerprints, RSA/ed25519 wire blob parse/encode, authorized_keys line
+  codec. Userauth publickey wire is PR-1b/1c/2.

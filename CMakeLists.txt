@@ -11,7 +11,7 @@ else()
     add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 endif()
 
-add_library(chssh STATIC src/chssh.c src/chssh_crypto.c)
+add_library(chssh STATIC src/chssh.c src/chssh_crypto.c src/chssh_pubkey.c)
 
 target_include_directories(chssh PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -133,6 +133,10 @@ add_test(NAME chssh_production COMMAND chssh_production_test)
 add_executable(chssh_hostkey_pem_test tests/test_chssh_hostkey_pem.c)
 target_link_libraries(chssh_hostkey_pem_test PRIVATE chssh)
 add_test(NAME chssh_hostkey_pem COMMAND chssh_hostkey_pem_test)
+
+add_executable(chssh_pubkey_test tests/test_chssh_pubkey.c)
+target_link_libraries(chssh_pubkey_test PRIVATE chssh)
+add_test(NAME chssh_pubkey COMMAND chssh_pubkey_test)
 
 # Optional OpenSSH client interop (TCP host + shell script; skips without sshpass)
 add_executable(chssh_openssh_server tests/chssh_openssh_server.c)

@@ -441,6 +441,75 @@ int chssh_send_keepalive(chssh_ctx_t *ctx);
 /** Request orderly close (sends disconnect when possible). */
 int chssh_disconnect(chssh_ctx_t *ctx, const char *description);
 
+/* --- Public key blob / fingerprint helpers (PR-1a; no userauth yet) --- */
+
+/** OpenSSH-style SHA256 fingerprint string: "SHA256:" + unpadded base64. */
+#define CHSSH_FP_SHA256_MAX 96
+/** Max algorithm name (e.g. ssh-ed25519, rsa-sha2-256). */
+#define CHSSH_ALGO_MAX 64
+/** Max SSH public key wire blob (RSA-4096-ish + headroom). */
+#define CHSSH_PUBKEY_BLOB_MAX 8192
+/** Max authorized_keys line when encoding. */
+#define CHSSH_OPENSSH_LINE_MAX 16384
+
+typedef enum {
+    CHSSH_PUBKEY_ALG_UNKNOWN = 0,
+    CHSSH_PUBKEY_ALG_SSH_RSA = 1,     /* wire type "ssh-rsa" */
+    CHSSH_PUBKEY_ALG_SSH_ED25519 = 2  /* wire type "ssh-ed25519" */
+} chssh_pubkey_alg_t;
+
+/**
+ * SHA256 fingerprint of an SSH public key blob (OpenSSH form).
+ * @p out must hold CHSSH_FP_SHA256_MAX bytes; always NUL-terminated on success.
+ * @return 0 ok, -1 bad args / crypto backend unavailable.
+ */
+int chssh_pubkey_fingerprint_sha256(const uint8_t *blob, size_t len,
+                                    char out[CHSSH_FP_SHA256_MAX]);
+
+/**
+ * Validate SSH public key wire blob and report algorithm.
+ * RSA: string "ssh-rsa" || mpint e || mpint n.
+ * ed25519: string "ssh-ed25519" || string (32-byte public key).
+ * @return 0 ok, -1 invalid / truncated / unknown type.
+ */
+int chssh_pubkey_blob_parse(const uint8_t *blob, size_t len,
+                            chssh_pubkey_alg_t *alg_out);
+
+/**
+ * Parse one OpenSSH authorized_keys / .pub line:
+ *   &lt;algo&gt; &lt;base64-blob&gt; [comment…]
+ * Skips leading options fields only when they contain '=' (OpenSSH option
+ * tokens); plain algorithm tokens are accepted as type.
+ * @return 0 ok, -1 parse / size / validation error.
+ */
+int chssh_pubkey_openssh_line_parse(const char *line, uint8_t *blob,
+                                    size_t blob_cap, size_t *blob_len,
+                                    chssh_pubkey_alg_t *alg_out, char *comment,
+                                    size_t comment_cap);
+
+/**
+ * Encode blob as OpenSSH single-line public key (algo base64 [comment]).
+ * @return 0 ok, -1 bad blob / buffer too small.
+ */
+int chssh_pubkey_openssh_line_encode(const uint8_t *blob, size_t blob_len,
+                                     const char *comment, char *line,
+                                     size_t line_cap);
+
+/**
+ * Build RFC 4253 RSA public key blob from bare big-endian e and n
+ * (no mpint length headers; high-bit zero-pad applied as needed).
+ */
+int chssh_pubkey_blob_encode_rsa(const uint8_t *e, size_t e_len,
+                                 const uint8_t *n, size_t n_len, uint8_t *out,
+                                 size_t cap, size_t *out_len);
+
+/** Build ssh-ed25519 public key blob from 32-byte raw public key. */
+int chssh_pubkey_blob_encode_ed25519(const uint8_t pk[32], uint8_t *out,
+                                     size_t cap, size_t *out_len);
+
+/** Wire algorithm name for @p alg, or NULL if unknown. */
+const char *chssh_pubkey_alg_name(chssh_pubkey_alg_t alg);
+
 #ifdef __cplusplus
 }
 #endif

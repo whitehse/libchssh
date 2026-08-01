@@ -30,7 +30,10 @@
 - [x] Staff reverse `sftp` / `exec` (SCP) / subsystems `tun` + `tap`
 - [ ] curve25519-sha256 KEX (optional modern path)
 - [ ] ed25519 host keys (keep RSA preferred for field OLTs)
-- [ ] Host key pin / known_hosts for client role
+- [x] Public key blob parse/encode + SHA256 fingerprint (PR-1a; ed25519+RSA)
+- [ ] Publickey userauth sign/verify RSA (PR-1b) / ed25519 (PR-1c)
+- [ ] Dual-auth SM + AUTH_PUBLICKEY events (PR-2)
+- [ ] Host key pin / known_hosts for client role (PR-3)
 - [x] edgehost `e7_callhome` integration (libchssh preferred path)
 - [ ] libnetconf optional backend via libchssh
 - [ ] Fuzz corpus for identification + encrypted packet parser
