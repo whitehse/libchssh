@@ -170,6 +170,10 @@ add_executable(chssh_dual_auth_test tests/test_chssh_dual_auth.c)
 target_link_libraries(chssh_dual_auth_test PRIVATE chssh)
 add_test(NAME chssh_dual_auth COMMAND chssh_dual_auth_test)
 
+add_executable(chssh_hostkey_pin_test tests/test_chssh_hostkey_pin.c)
+target_link_libraries(chssh_hostkey_pin_test PRIVATE chssh)
+add_test(NAME chssh_hostkey_pin COMMAND chssh_hostkey_pin_test)
+
 # Optional OpenSSH client interop (TCP host + shell script; skips without sshpass)
 add_executable(chssh_openssh_server tests/chssh_openssh_server.c)
 target_link_libraries(chssh_openssh_server PRIVATE chssh)

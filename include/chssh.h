@@ -101,7 +101,18 @@ typedef struct {
     const char *client_private_key_path;
     const char *client_private_key_pem; /* optional alternate to path */
 
-    int accept_any_hostkey; /* CLIENT lab: accept peer host key without pin */
+    /**
+     * CLIENT host-key pin (PR-3). After crypto verify of host key over H:
+     * auto-continue only if accept_any_hostkey, or blob/fingerprint pin matches.
+     * Otherwise emit CHSSH_EVENT_HOSTKEY and wait for chssh_hostkey_decide.
+     * Product configs leave accept_any=0; tests may set 1.
+     */
+    int accept_any_hostkey;
+    const uint8_t *pinned_host_key_blob;
+    size_t         pinned_host_key_blob_len;
+    /** OpenSSH form "SHA256:…" (optional alternate to blob pin). */
+    const char *pinned_host_key_sha256;
+
     int allow_none_auth;    /* SERVER lab: allow USERAUTH none */
 
     /**
@@ -168,6 +179,11 @@ typedef enum {
     CHSSH_EVENT_IDENT_SENT,
     CHSSH_EVENT_IDENT_RECEIVED,  /* peer banner available in event.ident */
     CHSSH_EVENT_KEX_COMPLETE,
+    /**
+     * CLIENT: peer host key crypto-verified; pin did not auto-match.
+     * Call chssh_hostkey_decide before userauth proceeds.
+     */
+    CHSSH_EVENT_HOSTKEY,
     CHSSH_EVENT_SERVICE_ACCEPTED,
 
     /* Auth: plumbing emits request; caller may call chssh_auth_decide (server) */
@@ -240,6 +256,15 @@ typedef struct {
             char     fingerprint_sha256[CHSSH_FP_SHA256_MAX];
             int      signature_present; /* 0=query, 1=signed+verified */
         } auth_pk;
+        /**
+         * HOSTKEY: blob pointer valid until chssh_hostkey_decide / destroy.
+         */
+        struct {
+            char     algo[CHSSH_ALGO_MAX]; /* e.g. ssh-rsa */
+            const uint8_t *host_key_blob;
+            size_t   host_key_blob_len;
+            char     fingerprint_sha256[CHSSH_FP_SHA256_MAX];
+        } hostkey;
         struct {
             uint32_t channel_id; /* local channel id */
             char     name[CHSSH_SUBSYS_NAME_MAX + 1];
@@ -339,6 +364,12 @@ int chssh_peer_ident_seen(const chssh_ctx_t *ctx);
  * never raise AUTH_PUBLICKEY (library sends FAILURE itself).
  */
 int chssh_auth_decide(chssh_ctx_t *ctx, int accept);
+
+/**
+ * CLIENT: after CHSSH_EVENT_HOSTKEY when pin did not auto-match.
+ * accept=1 continues to SERVICE/userauth; accept=0 → ERROR (never AUTHENTICATED).
+ */
+int chssh_hostkey_decide(chssh_ctx_t *ctx, int accept);
 
 /* --- Multi-channel API (ADR 015) --- */
 

@@ -1619,6 +1619,58 @@ static int client_handle_kexdh_reply_fixed(chssh_ctx_t *ctx, const uint8_t *p,
         chssh_i_set_error(ctx, 21, "host key signature verify failed");
         return -1;
     }
+    /* Store peer host key for pin / HOSTKEY event (PR-3). */
+    free(ctx->peer_host_key_blob);
+    ctx->peer_host_key_blob = (uint8_t *)malloc(hk_len);
+    if (!ctx->peer_host_key_blob) {
+        return -1;
+    }
+    memcpy(ctx->peer_host_key_blob, host_blob, hk_len);
+    ctx->peer_host_key_blob_len = hk_len;
+    ctx->peer_host_key_algo[0] = '\0';
+    if (hk_len >= 11) {
+        uint32_t tlen = get_u32(host_blob);
+        if (4 + tlen <= hk_len && tlen < CHSSH_ALGO_MAX) {
+            memcpy(ctx->peer_host_key_algo, host_blob + 4, tlen);
+            ctx->peer_host_key_algo[tlen] = '\0';
+        }
+    }
+    if (chssh_pubkey_fingerprint_sha256(host_blob, hk_len,
+                                        ctx->peer_host_key_fp) != 0) {
+        chssh_i_set_error(ctx, 21, "host key fingerprint failed");
+        return -1;
+    }
+    /* Pin policy: auto-accept or wait for hostkey_decide. */
+    {
+        int auto_ok = 0;
+        if (ctx->cfg.accept_any_hostkey) {
+            auto_ok = 1;
+        } else if (ctx->pinned_host_key_blob_len > 0 &&
+                   ctx->pinned_host_key_blob_len == hk_len &&
+                   ctx->pinned_host_key_blob &&
+                   memcmp(ctx->pinned_host_key_blob, host_blob, hk_len) == 0) {
+            auto_ok = 1;
+        } else if (ctx->pinned_host_key_sha256[0] &&
+                   strcmp(ctx->pinned_host_key_sha256,
+                          ctx->peer_host_key_fp) == 0) {
+            auto_ok = 1;
+        }
+        if (auto_ok) {
+            ctx->hostkey_status = 1; /* accepted */
+        } else {
+            ctx->hostkey_status = 2; /* pending */
+            memset(&ev, 0, sizeof(ev));
+            ev.type = CHSSH_EVENT_HOSTKEY;
+            snprintf(ev.u.hostkey.algo, sizeof(ev.u.hostkey.algo), "%s",
+                     ctx->peer_host_key_algo);
+            ev.u.hostkey.host_key_blob = ctx->peer_host_key_blob;
+            ev.u.hostkey.host_key_blob_len = ctx->peer_host_key_blob_len;
+            snprintf(ev.u.hostkey.fingerprint_sha256,
+                     sizeof(ev.u.hostkey.fingerprint_sha256), "%s",
+                     ctx->peer_host_key_fp);
+            (void)chssh_i_push_event(ctx, &ev);
+        }
+    }
     ctx->kexdh_done = 1;
     if (send_newkeys(ctx) != 0 || activate_keys_after_newkeys_sent(ctx) != 0) {
         chssh_i_set_error(ctx, 22, "NEWKEYS / activate keys failed");
@@ -1629,7 +1681,11 @@ static int client_handle_kexdh_reply_fixed(chssh_ctx_t *ctx, const uint8_t *p,
         memset(&ev, 0, sizeof(ev));
         ev.type = CHSSH_EVENT_KEX_COMPLETE;
         (void)chssh_i_push_event(ctx, &ev);
-        return send_service_and_auth_client(ctx);
+        /* Only start userauth after host key accepted (PR-3). */
+        if (ctx->hostkey_status == 1) {
+            return send_service_and_auth_client(ctx);
+        }
+        /* hostkey_status==2: wait for chssh_hostkey_decide */
     }
     return 0;
 }
@@ -1780,7 +1836,14 @@ static int handle_payload(chssh_ctx_t *ctx, const uint8_t *p, size_t len)
                 ev.type = CHSSH_EVENT_KEX_COMPLETE;
                 (void)chssh_i_push_event(ctx, &ev);
                 if (ctx->role == CHSSH_ROLE_CLIENT) {
-                    return send_service_and_auth_client(ctx);
+                    /* PR-3: do not start userauth until host key accepted */
+                    if (ctx->hostkey_status == 1) {
+                        return send_service_and_auth_client(ctx);
+                    }
+                    /* status 0 (lab) or 2 (pending) — lab has no hostkey path */
+                    if (ctx->hostkey_status == 0) {
+                        return send_service_and_auth_client(ctx);
+                    }
                 }
             }
         }
@@ -2612,9 +2675,31 @@ chssh_ctx_t *chssh_create(chssh_role_t role, const chssh_config_t *cfg)
     ctx->cfg.host_key_path = cfg_dup(ctx, cfg ? cfg->host_key_path : NULL);
     ctx->cfg.allowed_subsystems =
         cfg_dup(ctx, cfg ? cfg->allowed_subsystems : NULL);
+    ctx->cfg.accept_any_hostkey = cfg ? (cfg->accept_any_hostkey ? 1 : 0) : 0;
+    /* Host-key pin copy (PR-3) */
+    if (cfg && cfg->pinned_host_key_blob && cfg->pinned_host_key_blob_len > 0 &&
+        cfg->pinned_host_key_blob_len <= CHSSH_PUBKEY_BLOB_MAX) {
+        ctx->pinned_host_key_blob =
+            (uint8_t *)malloc(cfg->pinned_host_key_blob_len);
+        if (ctx->pinned_host_key_blob) {
+            memcpy(ctx->pinned_host_key_blob, cfg->pinned_host_key_blob,
+                   cfg->pinned_host_key_blob_len);
+            ctx->pinned_host_key_blob_len = cfg->pinned_host_key_blob_len;
+        }
+    }
+    if (cfg && cfg->pinned_host_key_sha256 && cfg->pinned_host_key_sha256[0]) {
+        snprintf(ctx->pinned_host_key_sha256,
+                 sizeof(ctx->pinned_host_key_sha256), "%s",
+                 cfg->pinned_host_key_sha256);
+    }
+    ctx->cfg.pinned_host_key_blob = ctx->pinned_host_key_blob;
+    ctx->cfg.pinned_host_key_blob_len = ctx->pinned_host_key_blob_len;
+    ctx->cfg.pinned_host_key_sha256 =
+        ctx->pinned_host_key_sha256[0] ? ctx->pinned_host_key_sha256 : NULL;
 
     ctx->hold_ident = cfg ? cfg->hold_ident : 0;
     ctx->lab_mode = cfg ? cfg->lab_mode : 0;
+    ctx->hostkey_status = 0;
     /*
      * Method offers (PR-2): zero-init configs get both when production crypto
      * is available; lab_mode defaults to password-only advertisement.
@@ -2705,6 +2790,10 @@ void chssh_destroy(chssh_ctx_t *ctx)
     chssh_identity_free(ctx->client_identity);
     ctx->client_identity = NULL;
     free_auth_pending_blob(ctx);
+    free(ctx->peer_host_key_blob);
+    ctx->peer_host_key_blob = NULL;
+    free(ctx->pinned_host_key_blob);
+    ctx->pinned_host_key_blob = NULL;
     free(ctx->events);
     free(ctx->in_buf);
     free(ctx->out_buf);
@@ -2840,6 +2929,30 @@ int chssh_ident_flushed(const chssh_ctx_t *ctx)
 int chssh_peer_ident_seen(const chssh_ctx_t *ctx)
 {
     return ctx ? ctx->peer_ident_seen : 0;
+}
+
+int chssh_hostkey_decide(chssh_ctx_t *ctx, int accept)
+{
+    if (!ctx || ctx->role != CHSSH_ROLE_CLIENT) {
+        return -1;
+    }
+    if (ctx->hostkey_status != 2) {
+        return -1; /* not waiting for pin decide */
+    }
+    if (!accept) {
+        ctx->hostkey_status = 3;
+        chssh_i_set_error(ctx, 21, "host key rejected by pin policy");
+        return 0;
+    }
+    ctx->hostkey_status = 1;
+    /* Proceed to userauth once crypto handshake is complete. */
+    if (ctx->kexdh_done && ctx->newkeys_sent && ctx->newkeys_received) {
+        if (ctx->state == CHSSH_STATE_KEX || ctx->state == CHSSH_STATE_SERVICE) {
+            ctx->state = CHSSH_STATE_SERVICE;
+            return send_service_and_auth_client(ctx);
+        }
+    }
+    return 0;
 }
 
 int chssh_auth_decide(chssh_ctx_t *ctx, int accept)

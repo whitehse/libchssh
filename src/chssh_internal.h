@@ -152,6 +152,15 @@ struct chssh_ctx {
     size_t pk_pending_blob_len;
     char pk_pending_algo[CHSSH_ALGO_MAX];
     char pk_pending_fp[CHSSH_FP_SHA256_MAX];
+    /* PR-3 host-key pin (client) */
+    int hostkey_status; /* 0 unset, 1 accepted, 2 pending decide, 3 rejected */
+    uint8_t *peer_host_key_blob;
+    size_t peer_host_key_blob_len;
+    char peer_host_key_fp[CHSSH_FP_SHA256_MAX];
+    char peer_host_key_algo[CHSSH_ALGO_MAX];
+    uint8_t *pinned_host_key_blob; /* copy of config pin */
+    size_t pinned_host_key_blob_len;
+    char pinned_host_key_sha256[CHSSH_FP_SHA256_MAX];
 
     /* Production crypto */
     chssh_rsa_key_t *host_key;       /* server host key; client unused */
